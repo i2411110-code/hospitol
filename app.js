@@ -79,7 +79,15 @@ document.getElementById('btnLogout').addEventListener('click', () => signOut(aut
      (JS 키는 브라우저에 노출되는 것이 정상이며, REST API 키와는 다른 값입니다.)
    - 카카오 개발자 콘솔 > 앱 설정 > 플랫폼에 이 사이트 도메인을 "Web 플랫폼"으로 등록해야 합니다.
 --------------------------------------------------------- */
+/* ---------------------------------------------------------
+   카카오 로그인 (Redirect 방식 — 2026-07-24 이후 카카오가 팝업 방식 지원을 종료함에 따라 전환)
+   - KAKAO_JS_KEY는 카카오 개발자 콘솔 > 내 애플리케이션 > 앱 키 > "JavaScript 키" 값입니다.
+   - 카카오 개발자 콘솔 > 카카오 로그인 > Redirect URI 메뉴에 아래 KAKAO_REDIRECT_URI 값을
+     "정확히 그대로" 등록해야 합니다 (배포 도메인이 바뀌면 이 값과 콘솔 등록 값을 함께 갱신).
+   - 카카오 개발자 콘솔 > 앱 설정 > 플랫폼에 이 사이트 도메인을 "Web 플랫폼"으로 등록해야 합니다.
+--------------------------------------------------------- */
 const KAKAO_JS_KEY = 'fe63758ba86171a9aa4341f1a6ae2052';
+const KAKAO_REDIRECT_URI = window.location.origin + window.location.pathname;
 
 if (window.Kakao && !window.Kakao.isInitialized()) {
   window.Kakao.init(KAKAO_JS_KEY);
@@ -90,32 +98,50 @@ const kakaoLoginError = document.getElementById('kakaoLoginError');
 
 btnKakaoLogin.addEventListener('click', () => {
   kakaoLoginError.textContent = '';
-
-  window.Kakao.Auth.login({
-    scope: 'profile_nickname',
-    success: async (authObj) => {
-      try {
-        const res = await fetch('/api/kakao-auth', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ accessToken: authObj.access_token })
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          kakaoLoginError.textContent = '카카오 로그인 실패: ' + (data.error || '알 수 없는 오류');
-          return;
-        }
-        await signInWithCustomToken(auth, data.token);
-        // 이후 onAuthStateChanged가 이어서 프로필 설정/승인 흐름을 처리함
-      } catch (err) {
-        kakaoLoginError.textContent = '카카오 로그인 처리 중 오류가 발생했습니다.';
-      }
-    },
-    fail: (err) => {
-      kakaoLoginError.textContent = '카카오 로그인이 취소되었거나 실패했습니다.';
-    }
+  if (!window.Kakao) {
+    kakaoLoginError.textContent = '카카오 SDK를 불러오지 못했습니다. 새로고침 후 다시 시도해주세요.';
+    return;
+  }
+  // 팝업 대신 페이지 전체가 카카오 로그인 화면으로 이동했다가 redirectUri로 돌아옵니다.
+  window.Kakao.Auth.authorize({
+    redirectUri: KAKAO_REDIRECT_URI,
+    scope: 'profile_nickname'
   });
 });
+
+// 카카오 로그인 화면에서 돌아왔을 때 (?code=... 붙어서 리다이렉트됨) 처리
+(async function handleKakaoRedirectCallback() {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get('code');
+  const kakaoError = params.get('error');
+
+  if (kakaoError) {
+    history.replaceState(null, '', window.location.pathname);
+    if (kakaoLoginError) kakaoLoginError.textContent = '카카오 로그인이 취소되었거나 실패했습니다.';
+    return;
+  }
+  if (!code) return;
+
+  // 새로고침 시 인가 코드가 재사용되어 에러나지 않도록 URL에서 즉시 제거
+  history.replaceState(null, '', window.location.pathname);
+
+  try {
+    const res = await fetch('/api/kakao-auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, redirectUri: KAKAO_REDIRECT_URI })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      if (kakaoLoginError) kakaoLoginError.textContent = '카카오 로그인 실패: ' + (data.error || '알 수 없는 오류');
+      return;
+    }
+    await signInWithCustomToken(auth, data.token);
+    // 이후 onAuthStateChanged가 이어서 프로필 설정/승인 흐름을 처리함
+  } catch (err) {
+    if (kakaoLoginError) kakaoLoginError.textContent = '카카오 로그인 처리 중 오류가 발생했습니다.';
+  }
+})();
 
 setupForm.addEventListener('submit', async (e) => {
   e.preventDefault();
