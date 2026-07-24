@@ -1,0 +1,48 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // staff/{uid} : 담당자 프로필 (이름, 소속 팀, 역할)
+    // 본인 프로필은 본인만 읽고 쓸 수 있음. 팀장은 같은 팀 소속 프로필을 읽을 수 있음.
+    match /staff/{uid} {
+      allow read: if request.auth != null && (
+        request.auth.uid == uid ||
+        (
+          get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.role == 'lead' &&
+          get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.teamId ==
+            get(/databases/$(database)/documents/staff/$(uid)).data.teamId
+        )
+      );
+      // 프로필 생성/수정은 본인만 (역할/팀 배정은 관리자가 콘솔에서 직접 세팅 권장)
+      allow write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // teams/{teamId} : 팀 메타데이터 (팀명 등)
+    match /teams/{teamId} {
+      allow read: if request.auth != null;
+      allow write: if false; // 콘솔에서만 관리
+    }
+
+    // records/{recordId} : 접수/청구 서류 데이터
+    match /records/{recordId} {
+      // 본인이 작성한 기록이거나, 같은 팀의 팀장이면 읽기 가능
+      allow read: if request.auth != null && (
+        resource.data.staffId == request.auth.uid ||
+        (
+          get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.role == 'lead' &&
+          get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.teamId == resource.data.teamId
+        )
+      );
+
+      // 생성은 로그인한 담당자 본인 명의로만 가능 (staffId 위조 방지)
+      allow create: if request.auth != null &&
+        request.resource.data.staffId == request.auth.uid &&
+        request.resource.data.teamId ==
+          get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.teamId;
+
+      // 수정/삭제는 작성자 본인만
+      allow update, delete: if request.auth != null && resource.data.staffId == request.auth.uid;
+    }
+  }
+}

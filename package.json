@@ -1,0 +1,12 @@
+{
+  "name": "hospital-insurance-intake",
+  "version": "1.0.0",
+  "private": true,
+  "description": "병원 내보험 조회/청구 접수 시스템 (Firebase Auth+Firestore, Naver Clova OCR)",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.6.0"
+  }
+}
