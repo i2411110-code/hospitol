@@ -14,12 +14,11 @@ import {
   doc,
   getDoc,
   setDoc,
-  addDoc,
   collection,
   query,
   where,
-  orderBy,
   getDocs,
+  runTransaction,
   serverTimestamp
 } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
 
@@ -29,6 +28,42 @@ const db = getFirestore(app);
 
 let currentUser = null;   // Firebase Auth user
 let currentStaff = null;  // { name, teamId, role } from Firestore staff/{uid}
+
+/* ---------------------------------------------------------
+   공용 유틸
+--------------------------------------------------------- */
+
+// innerHTML에 넣는 모든 사용자 입력값은 반드시 esc()를 거칩니다 (XSS 방지)
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+const digitsOnly = (s) => String(s ?? '').replace(/\D/g, '');
+const normName = (s) => String(s ?? '').replace(/\s+/g, '');
+const roleLabel = (role) => (role === 'lead' ? '팀장' : '팀원');
+
+function maskSsn(d) {
+  return d.slice(0, 6) + '-' + d.slice(6, 7) + '******';
+}
+function maskPhone(d) {
+  return d.slice(0, 3) + '-****-' + d.slice(-4);
+}
+function formatSsnInput(raw) {
+  const d = digitsOnly(raw).slice(0, 13);
+  return d.length > 6 ? d.slice(0, 6) + '-' + d.slice(6) : d;
+}
+function formatPhoneInput(raw) {
+  const d = digitsOnly(raw).slice(0, 11);
+  if (d.length <= 3) return d;
+  if (d.length <= 7) return d.slice(0, 3) + '-' + d.slice(3);
+  return d.slice(0, 3) + '-' + d.slice(3, 7) + '-' + d.slice(7);
+}
+function formatDate(ts) {
+  return ts?.toDate ? ts.toDate().toLocaleString('ko-KR') : '';
+}
+async function sha256Hex(text) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
 
 /* ---------------------------------------------------------
    로그인 / 로그아웃 / 최초 프로필 생성
@@ -73,12 +108,6 @@ btnSignup.addEventListener('click', async () => {
 
 document.getElementById('btnLogout').addEventListener('click', () => signOut(auth));
 
-/* ---------------------------------------------------------
-   카카오 로그인
-   - KAKAO_JS_KEY는 카카오 개발자 콘솔 > 내 애플리케이션 > 앱 키 > "JavaScript 키" 값입니다.
-     (JS 키는 브라우저에 노출되는 것이 정상이며, REST API 키와는 다른 값입니다.)
-   - 카카오 개발자 콘솔 > 앱 설정 > 플랫폼에 이 사이트 도메인을 "Web 플랫폼"으로 등록해야 합니다.
---------------------------------------------------------- */
 /* ---------------------------------------------------------
    카카오 로그인 (Redirect 방식 — 2026-07-24 이후 카카오가 팝업 방식 지원을 종료함에 따라 전환)
    - KAKAO_JS_KEY는 카카오 개발자 콘솔 > 내 애플리케이션 > 앱 키 > "JavaScript 키" 값입니다.
@@ -187,12 +216,13 @@ async function loadStaffProfile() {
   appRoot.classList.remove('hidden');
 
   document.getElementById('currentStaffName').textContent = currentStaff.name;
-  document.getElementById('currentStaffRole').textContent = currentStaff.role === 'lead' ? '팀장' : '팀원';
-  document.getElementById('btnStaffName').textContent = currentStaff.name;
+  document.getElementById('currentStaffRole').textContent = roleLabel(currentStaff.role);
 
   // 팀장에게만 "팀 전체 현황" 탭 노출
   const teamTabBtn = document.getElementById('tab-team-overview');
   teamTabBtn.classList.toggle('hidden', currentStaff.role !== 'lead');
+
+  switchTab('lookup');
 }
 
 /* ---------------------------------------------------------
@@ -213,158 +243,184 @@ window.switchTab = function switchTab(tabId) {
     targetTab.classList.remove('text-gray-600');
   }
 
-  if (tabId === 'saved-records') renderMyRecords();
   if (tabId === 'team-overview') renderTeamOverview();
+  if (tabId === 'lookup') document.getElementById('lookupName').focus();
 };
 
 /* ---------------------------------------------------------
-   태블릿 펜 캔버스
+   고객 조회 (고객명 입력 → 등록 담당자 표시)
+   - patients 컬렉션에서 이름(공백 제거)이 입력값으로 "시작하는" 고객을 찾습니다.
 --------------------------------------------------------- */
-const canvas = document.getElementById('penCanvas');
-const ctx = canvas.getContext('2d');
-let isDrawing = false;
+const lookupResult = document.getElementById('lookupResult');
 
-function initCanvas() {
-  canvas.width = canvas.offsetWidth;
-  canvas.height = canvas.offsetHeight;
-  ctx.strokeStyle = '#1e1b4b';
-  ctx.lineWidth = 2.5;
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-}
-window.addEventListener('load', initCanvas);
-window.addEventListener('resize', initCanvas);
-
-function getPos(e) {
-  const rect = canvas.getBoundingClientRect();
-  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-  return { x: clientX - rect.left, y: clientY - rect.top };
+function staffLine(p) {
+  return `담당자 : ${esc(p.staffName)} ${roleLabel(p.staffRole)}`;
 }
 
-canvas.addEventListener('pointerdown', (e) => {
-  isDrawing = true;
-  const pos = getPos(e);
-  ctx.beginPath();
-  ctx.moveTo(pos.x, pos.y);
-});
-canvas.addEventListener('pointermove', (e) => {
-  if (!isDrawing) return;
-  const pos = getPos(e);
-  ctx.lineTo(pos.x, pos.y);
-  ctx.stroke();
-});
-canvas.addEventListener('pointerup', () => isDrawing = false);
-canvas.addEventListener('pointerleave', () => isDrawing = false);
-
-window.clearCanvas = function clearCanvas() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  document.getElementById('ocrStatus').textContent = '';
-};
-
-/* ---------------------------------------------------------
-   Naver Clova OCR 연동 (서버리스 함수 /api/ocr 경유)
---------------------------------------------------------- */
-window.convertHandwritingToText = async function convertHandwritingToText() {
-  const ocrStatus = document.getElementById('ocrStatus');
-  const formNotes = document.getElementById('form-notes');
-
-  ocrStatus.textContent = '✨ Clova OCR로 손글씨 인식 중...';
-
-  try {
-    const imageBase64 = canvas.toDataURL('image/png');
-    const res = await fetch('/api/ocr', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imageBase64 })
-    });
-    const data = await res.json();
-
-    if (!res.ok) {
-      ocrStatus.textContent = '❌ 인식 실패: ' + (data.error || '알 수 없는 오류');
-      return;
-    }
-
-    const recognized = (data.text || '').trim();
-    if (!recognized) {
-      ocrStatus.textContent = '⚠️ 인식된 텍스트가 없습니다. 조금 더 또박또박 작성해보세요.';
-      return;
-    }
-
-    formNotes.value = (formNotes.value ? formNotes.value + '\n' : '') + '[손글씨 OCR 변환]: ' + recognized;
-    ocrStatus.textContent = '✅ 손글씨 텍스트 변환 완료!';
-  } catch (err) {
-    ocrStatus.textContent = '❌ 네트워크 오류로 인식에 실패했습니다.';
-  }
-};
-
-/* ---------------------------------------------------------
-   접수 서류 저장 (Firestore)
---------------------------------------------------------- */
-document.getElementById('insuranceForm').addEventListener('submit', async (e) => {
+document.getElementById('lookupForm').addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (!currentUser || !currentStaff) return;
-
-  const record = {
-    staffId: currentUser.uid,
-    staffName: currentStaff.name,
-    teamId: currentStaff.teamId,
-    name: document.getElementById('form-name').value || '',
-    ssn: document.getElementById('form-ssn').value || '',
-    phone: document.getElementById('form-phone').value || '',
-    insurer: document.getElementById('form-insurer').value || '',
-    notes: document.getElementById('form-notes').value || '',
-    canvasImg: canvas.toDataURL('image/png'),
-    createdAt: serverTimestamp()
-  };
-
-  try {
-    await addDoc(collection(db, 'records'), record);
-    alert(`${currentStaff.name} 담당자 계정으로 서류가 저장되었습니다.`);
-    clearCanvas();
-    e.target.reset();
-    switchTab('saved-records');
-  } catch (err) {
-    alert('저장 중 오류가 발생했습니다: ' + err.message);
-  }
-});
-
-/* ---------------------------------------------------------
-   내 접수 목록 (본인 데이터만)
---------------------------------------------------------- */
-async function renderMyRecords() {
-  const tbody = document.getElementById('savedTableBody');
-  tbody.innerHTML = `<tr><td colspan="6" class="p-8 text-center text-gray-400">불러오는 중...</td></tr>`;
-
-  const q = query(
-    collection(db, 'records'),
-    where('staffId', '==', currentUser.uid),
-    orderBy('createdAt', 'desc')
-  );
-  const snap = await getDocs(q);
-
-  if (snap.empty) {
-    tbody.innerHTML = `<tr><td colspan="6" class="p-8 text-center text-gray-400">저장된 접수 내역이 없습니다.</td></tr>`;
+  const raw = document.getElementById('lookupName').value;
+  const key = normName(raw);
+  if (!key) {
+    lookupResult.className = 'border rounded-xl p-4 bg-slate-50 text-center text-sm text-gray-500';
+    lookupResult.textContent = '고객명을 입력해주세요.';
     return;
   }
 
-  tbody.innerHTML = snap.docs.map(d => {
-    const r = d.data();
-    const date = r.createdAt?.toDate ? r.createdAt.toDate().toLocaleString('ko-KR') : '';
-    return `
-      <tr class="hover:bg-slate-50">
-        <td class="p-3 text-[11px] text-gray-400">${date}</td>
-        <td class="p-3 font-bold">${r.name}</td>
-        <td class="p-3">${r.ssn}</td>
-        <td class="p-3">${r.insurer}</td>
-        <td class="p-3 max-w-xs truncate">${r.notes}</td>
-        <td class="p-3"><img src="${r.canvasImg}" class="h-8 border rounded bg-white" alt="서명"></td>
-      </tr>`;
-  }).join('');
-}
+  lookupResult.className = 'border rounded-xl p-4 bg-slate-50 text-center text-sm text-gray-400';
+  lookupResult.textContent = '조회 중...';
+
+  try {
+    const q = query(
+      collection(db, 'patients'),
+      where('nameKey', '>=', key),
+      where('nameKey', '<=', key + '\uf8ff')
+    );
+    const snap = await getDocs(q);
+    const list = snap.docs
+      .map(d => d.data())
+      .sort((a, b) => (a.createdAt?.toMillis?.() ?? 0) - (b.createdAt?.toMillis?.() ?? 0));
+
+    if (list.length === 0) {
+      lookupResult.className = 'border rounded-xl p-6 bg-slate-50 text-center';
+      lookupResult.innerHTML = `
+        <p class="text-sm text-gray-600 mb-3"><strong>${esc(raw.trim())}</strong> 님은 등록된 고객이 아닙니다.</p>
+        <button type="button" id="btnGoRegister" class="px-5 py-2.5 bg-indigo-600 text-white font-bold text-sm rounded-lg hover:bg-indigo-700">
+          <i class="fa-solid fa-user-plus mr-1"></i> 신규 접수하기
+        </button>`;
+      document.getElementById('btnGoRegister').addEventListener('click', () => {
+        document.getElementById('reg-name').value = raw.trim();
+        switchTab('new-registration');
+        document.getElementById('reg-ssn').focus();
+      });
+      return;
+    }
+
+    lookupResult.className = 'space-y-2';
+    lookupResult.innerHTML = list.map(p => {
+      const mine = p.staffId === currentUser.uid;
+      return `
+        <div class="bg-white border rounded-xl p-4 text-left shadow-sm flex justify-between items-center gap-3">
+          <div>
+            <span class="bg-emerald-100 text-emerald-800 font-bold text-xs px-2 py-0.5 rounded">등록된 고객</span>
+            ${mine ? '<span class="bg-indigo-100 text-indigo-800 font-bold text-xs px-2 py-0.5 rounded ml-1">내 고객</span>' : ''}
+            <h4 class="font-bold text-lg text-gray-900 mt-1">${esc(p.name)}</h4>
+            <p class="text-sm font-bold text-indigo-700 mt-0.5">${staffLine(p)}</p>
+            <p class="text-xs text-gray-400 mt-1">${esc(p.phoneMasked)} · 등록일 ${esc(formatDate(p.createdAt))}</p>
+          </div>
+        </div>`;
+    }).join('');
+  } catch (err) {
+    lookupResult.className = 'border rounded-xl p-4 bg-red-50 text-center text-sm text-red-600';
+    lookupResult.textContent = '조회 중 오류가 발생했습니다: ' + err.message;
+  }
+});
 
 /* ---------------------------------------------------------
-   팀 전체 현황 (팀장만 접근 - 화면 노출 + Firestore Rules 이중 방어)
+   신규 접수 (선접수 우선 + 2가지 이상 일치 시 중복 판정)
+   - 성함+주민번호 / 성함+휴대폰 / 주민번호+휴대폰 3가지 "쌍"의 해시를
+     patientKeys 문서 ID로 저장합니다. 이 중 하나라도 이미 있으면 2가지 이상 일치입니다.
+   - 확인과 등록을 하나의 트랜잭션으로 처리하므로, 동시에 접수해도 먼저 커밋된 사람이 담당자가 됩니다.
+   - 주민번호/휴대폰 원문은 저장하지 않고 마스킹 값과 해시만 저장합니다.
+--------------------------------------------------------- */
+const regSsn = document.getElementById('reg-ssn');
+const regPhone = document.getElementById('reg-phone');
+regSsn.addEventListener('input', () => { regSsn.value = formatSsnInput(regSsn.value); });
+regPhone.addEventListener('input', () => { regPhone.value = formatPhoneInput(regPhone.value); });
+
+const registerResult = document.getElementById('registerResult');
+const btnRegister = document.getElementById('btnRegister');
+
+function showRegisterMessage(kind, html) {
+  const styles = {
+    ok: 'bg-emerald-50 border-emerald-200 text-emerald-900',
+    dup: 'bg-amber-50 border-amber-300 text-amber-900',
+    err: 'bg-red-50 border-red-200 text-red-700'
+  };
+  registerResult.innerHTML = `<div class="border rounded-xl p-4 text-sm ${styles[kind]}">${html}</div>`;
+}
+
+document.getElementById('registerForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!currentUser || !currentStaff) return;
+  registerResult.innerHTML = '';
+
+  const name = document.getElementById('reg-name').value.trim();
+  const ssn = digitsOnly(regSsn.value);
+  const phone = digitsOnly(regPhone.value);
+  const carrier = document.getElementById('reg-carrier').value;
+  const address = document.getElementById('reg-address').value.trim();
+
+  if (!normName(name)) return showRegisterMessage('err', '성함을 입력해주세요.');
+  if (ssn.length !== 13) return showRegisterMessage('err', '주민등록번호 13자리를 정확히 입력해주세요.');
+  if (phone.length < 10 || phone.length > 11) return showRegisterMessage('err', '휴대폰 번호를 정확히 입력해주세요.');
+
+  btnRegister.disabled = true;
+  try {
+    const nk = normName(name);
+    const hashes = await Promise.all([
+      sha256Hex(`ns|${nk}|${ssn}`),     // 성함 + 주민번호
+      sha256Hex(`np|${nk}|${phone}`),   // 성함 + 휴대폰
+      sha256Hex(`sp|${ssn}|${phone}`)   // 주민번호 + 휴대폰
+    ]);
+    const keyRefs = hashes.map(h => doc(db, 'patientKeys', h));
+    const patientRef = doc(collection(db, 'patients'));
+
+    const result = await runTransaction(db, async (tx) => {
+      // 트랜잭션 규칙: 모든 읽기를 먼저, 쓰기는 나중에
+      const keySnaps = [];
+      for (const ref of keyRefs) keySnaps.push(await tx.get(ref));
+      const hit = keySnaps.find(s => s.exists());
+
+      if (hit) {
+        const pSnap = await tx.get(doc(db, 'patients', hit.data().patientId));
+        return { duplicate: true, patient: pSnap.exists() ? pSnap.data() : null };
+      }
+
+      tx.set(patientRef, {
+        name,
+        nameKey: nk,
+        ssnMasked: maskSsn(ssn),
+        phoneMasked: maskPhone(phone),
+        carrier,
+        address,
+        staffId: currentUser.uid,
+        staffName: currentStaff.name,
+        staffRole: currentStaff.role,
+        teamId: currentStaff.teamId,
+        createdAt: serverTimestamp()
+      });
+      keyRefs.forEach(ref => tx.set(ref, {
+        patientId: patientRef.id,
+        staffId: currentUser.uid,
+        createdAt: serverTimestamp()
+      }));
+      return { duplicate: false };
+    });
+
+    if (result.duplicate) {
+      const p = result.patient;
+      showRegisterMessage('dup', `
+        <p class="font-bold text-base"><i class="fa-solid fa-triangle-exclamation mr-1"></i>이미 등록된 고객입니다.</p>
+        <p class="mt-1">${p
+          ? `등록 담당자 : <strong>${esc(p.staffName)} ${roleLabel(p.staffRole)}</strong> (등록일 ${esc(formatDate(p.createdAt))})`
+          : '등록 담당자 정보를 불러오지 못했습니다. 관리자에게 문의해주세요.'}</p>
+        <p class="text-xs mt-2 opacity-80">성함 / 주민등록번호 / 휴대폰 중 2가지 이상이 기존 고객과 일치합니다. 먼저 등록한 담당자가 우선입니다.</p>`);
+    } else {
+      showRegisterMessage('ok', `
+        <p class="font-bold text-base"><i class="fa-solid fa-circle-check mr-1"></i>신규 고객으로 등록되었습니다.</p>
+        <p class="mt-1">담당자 : <strong>${esc(currentStaff.name)} ${roleLabel(currentStaff.role)}</strong></p>`);
+      e.target.reset();
+    }
+  } catch (err) {
+    showRegisterMessage('err', '등록 중 오류가 발생했습니다: ' + esc(err.message));
+  } finally {
+    btnRegister.disabled = false;
+  }
+});
+
+/* ---------------------------------------------------------
+   팀 전체 현황 (팀장만 접근 - 같은 팀 담당자들이 등록한 고객)
 --------------------------------------------------------- */
 async function renderTeamOverview() {
   const wrap = document.getElementById('teamOverviewBody');
@@ -374,98 +430,49 @@ async function renderTeamOverview() {
   }
   wrap.innerHTML = `<p class="text-sm text-gray-400 p-6 text-center">불러오는 중...</p>`;
 
-  const q = query(
-    collection(db, 'records'),
-    where('teamId', '==', currentStaff.teamId),
-    orderBy('createdAt', 'desc')
-  );
-  const snap = await getDocs(q);
+  try {
+    const q = query(collection(db, 'patients'), where('teamId', '==', currentStaff.teamId));
+    const snap = await getDocs(q);
+    const list = snap.docs
+      .map(d => d.data())
+      .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
 
-  if (snap.empty) {
-    wrap.innerHTML = `<p class="text-sm text-gray-400 p-6 text-center">우리 팀에 저장된 접수 내역이 없습니다.</p>`;
-    return;
-  }
+    if (list.length === 0) {
+      wrap.innerHTML = `<p class="text-sm text-gray-400 p-6 text-center">우리 팀에 등록된 고객이 없습니다.</p>`;
+      return;
+    }
 
-  // 담당자별 집계
-  const byStaff = {};
-  snap.docs.forEach(d => {
-    const r = d.data();
-    byStaff[r.staffName] = (byStaff[r.staffName] || 0) + 1;
-  });
+    // 담당자별 집계
+    const byStaff = {};
+    list.forEach(p => { byStaff[p.staffName] = (byStaff[p.staffName] || 0) + 1; });
 
-  const summaryHtml = Object.entries(byStaff).map(([name, count]) => `
-    <div class="bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-3 text-center">
-      <div class="text-xs font-bold text-indigo-700">${name}</div>
-      <div class="text-2xl font-extrabold text-indigo-900">${count}<span class="text-xs font-normal ml-1">건</span></div>
-    </div>`).join('');
+    const summaryHtml = Object.entries(byStaff).map(([name, count]) => `
+      <div class="bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-3 text-center">
+        <div class="text-xs font-bold text-indigo-700">${esc(name)}</div>
+        <div class="text-2xl font-extrabold text-indigo-900">${count}<span class="text-xs font-normal ml-1">명</span></div>
+      </div>`).join('');
 
-  const rowsHtml = snap.docs.map(d => {
-    const r = d.data();
-    const date = r.createdAt?.toDate ? r.createdAt.toDate().toLocaleString('ko-KR') : '';
-    return `
+    const rowsHtml = list.map(p => `
       <tr class="hover:bg-slate-50">
-        <td class="p-3 text-[11px] text-gray-400">${date}</td>
-        <td class="p-3 font-bold text-indigo-700">${r.staffName}</td>
-        <td class="p-3 font-bold">${r.name}</td>
-        <td class="p-3">${r.insurer}</td>
-        <td class="p-3 max-w-xs truncate">${r.notes}</td>
-      </tr>`;
-  }).join('');
+        <td class="p-3 text-[11px] text-gray-400">${esc(formatDate(p.createdAt))}</td>
+        <td class="p-3 font-bold text-indigo-700">${esc(p.staffName)}</td>
+        <td class="p-3 font-bold">${esc(p.name)}</td>
+        <td class="p-3">${esc(p.phoneMasked)}</td>
+      </tr>`).join('');
 
-  wrap.innerHTML = `
-    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">${summaryHtml}</div>
-    <div class="overflow-x-auto">
-      <table class="w-full text-left text-xs border-collapse">
-        <thead>
-          <tr class="bg-slate-100 text-gray-700 font-bold border-b">
-            <th class="p-3">일시</th><th class="p-3">담당자</th><th class="p-3">환자명</th><th class="p-3">보험사</th><th class="p-3">특이사항</th>
-          </tr>
-        </thead>
-        <tbody class="divide-y text-gray-600">${rowsHtml}</tbody>
-      </table>
-    </div>`;
+    wrap.innerHTML = `
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">${summaryHtml}</div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-xs border-collapse">
+          <thead>
+            <tr class="bg-slate-100 text-gray-700 font-bold border-b">
+              <th class="p-3">등록일시</th><th class="p-3">담당자</th><th class="p-3">고객명</th><th class="p-3">휴대폰</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y text-gray-600">${rowsHtml}</tbody>
+        </table>
+      </div>`;
+  } catch (err) {
+    wrap.innerHTML = `<p class="text-sm text-red-600 p-6 text-center">불러오지 못했습니다: ${esc(err.message)}</p>`;
+  }
 }
-
-/* ---------------------------------------------------------
-   재방문 검색 (Firestore 기반, 본인 기록 중 검색)
---------------------------------------------------------- */
-window.searchPatient = async function searchPatient() {
-  const qText = document.getElementById('revisitSearch').value.trim();
-  const res = document.getElementById('searchResult');
-  if (!qText) {
-    alert('검색어를 입력하세요.');
-    return;
-  }
-  res.innerHTML = `<p class="text-sm text-gray-400">검색 중...</p>`;
-
-  const q = query(collection(db, 'records'), where('staffId', '==', currentUser.uid));
-  const snap = await getDocs(q);
-  const matched = snap.docs.map(d => d.data()).filter(r => r.name.includes(qText) || (r.phone || '').includes(qText));
-
-  if (matched.length === 0) {
-    res.innerHTML = `<p class="text-sm text-gray-400 text-center py-4">일치하는 내 접수 기록이 없습니다.</p>`;
-    return;
-  }
-
-  res.innerHTML = matched.map(r => `
-    <div class="bg-white border rounded-xl p-4 text-left flex justify-between items-center shadow-sm mb-2">
-      <div>
-        <span class="bg-emerald-100 text-emerald-800 font-bold text-xs px-2 py-0.5 rounded">기존 환자</span>
-        <h4 class="font-bold text-base text-gray-900 mt-1">${r.name} 환자님</h4>
-        <p class="text-xs text-gray-500">보험사: ${r.insurer || '-'} | 담당: ${r.staffName}</p>
-      </div>
-      <button onclick="switchTab('insurance-form')" class="px-4 py-2 bg-indigo-600 text-white font-bold text-xs rounded-lg hover:bg-indigo-700">
-        조회/청구 서류 작성하기
-      </button>
-    </div>`).join('');
-};
-
-/* ---------------------------------------------------------
-   Claude 프롬프트 탭 - 복사 버튼
---------------------------------------------------------- */
-window.copyPromptText = function copyPromptText() {
-  const text = document.getElementById('promptText').innerText;
-  navigator.clipboard.writeText(text).then(() => {
-    alert('클립보드에 복사되었습니다.');
-  });
-};

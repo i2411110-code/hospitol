@@ -1,48 +1,38 @@
-rules_version = '2';
+// ============================================================
+// 고객 조회/신규 접수용 규칙 추가분
+// 사용법: Firebase 콘솔 > Firestore > 규칙 에서, 기존 규칙의
+//   `match /databases/{database}/documents { ... }` 블록 안쪽 맨 아래
+//   (records 규칙 아래)에 아래 내용을 그대로 붙여넣고 게시하세요.
+//   기존 포탈 규칙(1~6번)과 staff/teams/records 규칙은 건드리지 않습니다.
+// ============================================================
 
-service cloud.firestore {
-  match /databases/{database}/documents {
+    // 10. patients/{patientId} : 등록 고객 (이름, 마스킹된 주민번호/휴대폰, 담당자 정보)
+    //     - 담당자 프로필(staff 문서)이 있는 로그인 사용자만 조회 가능 (전체 담당자 간 조회용)
+    //     - 생성은 본인 명의(staffId)로만, 팀 코드는 본인 프로필의 팀과 일치해야 함
+    //     - 수정/삭제는 앱에서 불가 (관리자가 콘솔에서만 처리)
+    match /patients/{patientId} {
+      allow read: if request.auth != null
+        && exists(/databases/$(database)/documents/staff/$(request.auth.uid));
 
-    // staff/{uid} : 담당자 프로필 (이름, 소속 팀, 역할)
-    // 본인 프로필은 본인만 읽고 쓸 수 있음. 팀장은 같은 팀 소속 프로필을 읽을 수 있음.
-    match /staff/{uid} {
-      allow read: if request.auth != null && (
-        request.auth.uid == uid ||
-        (
-          get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.role == 'lead' &&
-          get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.teamId ==
-            get(/databases/$(database)/documents/staff/$(uid)).data.teamId
-        )
-      );
-      // 프로필 생성/수정은 본인만 (역할/팀 배정은 관리자가 콘솔에서 직접 세팅 권장)
-      allow write: if request.auth != null && request.auth.uid == uid;
+      allow create: if request.auth != null
+        && request.resource.data.staffId == request.auth.uid
+        && request.resource.data.teamId ==
+           get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.teamId;
+
+      allow update, delete: if false;
     }
 
-    // teams/{teamId} : 팀 메타데이터 (팀명 등)
-    match /teams/{teamId} {
-      allow read: if request.auth != null;
-      allow write: if false; // 콘솔에서만 관리
+    // 11. patientKeys/{hash} : 중복 판정용 키 (성함+주민번호 / 성함+휴대폰 / 주민번호+휴대폰 해시)
+    //     - 같은 요청에서 만들어지는 patients 문서의 담당자 본인만 생성 가능 (임의 키 생성 방지)
+    //     - 이미 있는 키는 덮어쓸 수 없음 (먼저 등록한 담당자 우선)
+    match /patientKeys/{keyId} {
+      allow read: if request.auth != null
+        && exists(/databases/$(database)/documents/staff/$(request.auth.uid));
+
+      allow create: if request.auth != null
+        && request.resource.data.staffId == request.auth.uid
+        && getAfter(/databases/$(database)/documents/patients/$(request.resource.data.patientId)).data.staffId
+           == request.auth.uid;
+
+      allow update, delete: if false;
     }
-
-    // records/{recordId} : 접수/청구 서류 데이터
-    match /records/{recordId} {
-      // 본인이 작성한 기록이거나, 같은 팀의 팀장이면 읽기 가능
-      allow read: if request.auth != null && (
-        resource.data.staffId == request.auth.uid ||
-        (
-          get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.role == 'lead' &&
-          get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.teamId == resource.data.teamId
-        )
-      );
-
-      // 생성은 로그인한 담당자 본인 명의로만 가능 (staffId 위조 방지)
-      allow create: if request.auth != null &&
-        request.resource.data.staffId == request.auth.uid &&
-        request.resource.data.teamId ==
-          get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.teamId;
-
-      // 수정/삭제는 작성자 본인만
-      allow update, delete: if request.auth != null && resource.data.staffId == request.auth.uid;
-    }
-  }
-}
