@@ -111,6 +111,9 @@ const loginForm = $('loginForm');
 const loginError = $('loginError');
 const btnSignup = $('btnSignup');
 
+// 이름 선점 문서 (문서 ID = 공백 제거한 이름; '/'는 문서 ID에 쓸 수 없어 치환)
+const staffNameRef = (name) => doc(db, 'staffNames', normName(name).replace(/\//g, '／'));
+
 const setupView = $('view-profile-setup');
 const setupForm = $('profileSetupForm');
 
@@ -229,19 +232,28 @@ setupForm.addEventListener('submit', async (e) => {
   }
 
   // 동명이인 가입 차단: 이 앱은 담당자를 "이름"으로 연결(내 고객/알림/코멘트)하므로,
-  // 이미 같은 이름의 다른 계정이 있으면 서로의 고객·알림이 섞입니다.
-  // 같은 이름이 있으면 구분용 이름(예: 김철수B, 김철수(부천))으로 가입하도록 막습니다.
+  // 같은 이름의 다른 계정이 있으면 서로의 고객·알림이 섞입니다.
+  // staff 컬렉션은 다른 직원 문서를 조회할 수 없으므로, 이름 선점용 문서(staffNames/{이름})로 확인합니다.
+  // (보안 규칙이 "문서가 없을 때만 생성"을 보장하므로 동시에 가입해도 먼저 만든 사람이 이름을 가집니다)
+  const claimRef = staffNameRef(name);
+  let claimSnap;
   try {
-    const sameName = await getDocs(query(collection(db, 'staff'), where('name', '==', name)));
-    const other = sameName.docs.find(d => d.id !== currentUser.uid);
-    if (other) {
-      alert(`'${name}' 이름으로 이미 가입한 담당자가 있습니다.\n동명이인이라면 이름 뒤에 구분 표시를 붙여 가입해주세요. (예: ${name}B, ${name}(부천))\n본인 계정이라면 기존 로그인 방식(이메일/카카오)으로 로그인해주세요.\n\n[확인용] 충돌 문서: staff/${other.id} · 이메일: ${other.data().email || '없음'} · 프로젝트: ${firebaseConfig.projectId}`);
+    claimSnap = await getDoc(claimRef);
+  } catch (err) {
+    alert('[1단계: 이름 조회 실패] firestore.rules의 staffNames 규칙 게시 여부와 프로젝트(' + firebaseConfig.projectId + ')를 확인해주세요.\n(' + (err.code || '') + ' ' + err.message + ')');
+    return;
+  }
+  if (claimSnap.exists() && claimSnap.data().uid !== currentUser.uid) {
+    alert(`'${name}' 이름으로 이미 가입한 담당자가 있습니다.\n동명이인이라면 이름 뒤에 구분 표시를 붙여 가입해주세요. (예: ${name}B, ${name}(부천))\n본인 계정이라면 기존 로그인 방식(이메일/카카오)으로 로그인해주세요.`);
+    return;
+  }
+  if (!claimSnap.exists()) {
+    try {
+      await setDoc(claimRef, { uid: currentUser.uid, name, createdAt: serverTimestamp() });
+    } catch (err) {
+      alert('[2단계: 이름 선점 실패] 방금 같은 이름으로 다른 분이 가입했거나 규칙이 맞지 않습니다.\n(' + (err.code || '') + ' ' + err.message + ')');
       return;
     }
-  } catch (err) {
-    // 보안 규칙상 다른 직원 문서를 조회할 수 없는 경우: 안전하게 가입을 중단합니다.
-    alert('이름 중복 확인에 실패했습니다. 잠시 후 다시 시도하거나 관리자에게 문의해주세요.\n(' + err.message + ')');
-    return;
   }
 
   // 최초 가입자는 기본 role 'staff'로 생성됩니다.
@@ -279,6 +291,16 @@ async function loadStaffProfile() {
     return;
   }
   currentStaff = snap.data();
+  // 기존 가입자는 로그인 시 자기 이름을 자동으로 선점해 둡니다 (이후 같은 이름의 가입을 막기 위함)
+  try {
+    const cref = staffNameRef(currentStaff.name);
+    const csnap = await getDoc(cref);
+    if (!csnap.exists()) {
+      await setDoc(cref, { uid: currentUser.uid, name: normName(currentStaff.name), createdAt: serverTimestamp() });
+    } else if (csnap.data().uid !== currentUser.uid) {
+      console.warn('[staff] 같은 이름의 다른 계정이 이미 이름을 선점했습니다:', currentStaff.name);
+    }
+  } catch (err) { /* 규칙 미게시 등: 로그인은 계속 진행 */ }
   setupView.classList.add('hidden');
   appRoot.classList.remove('hidden');
 
