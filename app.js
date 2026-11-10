@@ -143,6 +143,8 @@ btnSignup.addEventListener('click', async () => {
 });
 
 $('btnLogout').addEventListener('click', () => signOut(auth));
+// 프로필 설정 화면에서 빠져나오기 (로그아웃하면 로그인 화면으로 돌아감)
+$('btnSetupBack').addEventListener('click', () => signOut(auth));
 
 /* ---------------------------------------------------------
    카카오 로그인 (Redirect 방식 — 2026-07-24 이후 카카오가 팝업 방식 지원을 종료함에 따라 전환)
@@ -233,7 +235,7 @@ setupForm.addEventListener('submit', async (e) => {
     const sameName = await getDocs(query(collection(db, 'staff'), where('name', '==', name)));
     const other = sameName.docs.find(d => d.id !== currentUser.uid);
     if (other) {
-      alert(`'${name}' 이름으로 이미 가입한 담당자가 있습니다.\n동명이인이라면 이름 뒤에 구분 표시를 붙여 가입해주세요. (예: ${name}B, ${name}(부천))\n본인 계정이라면 기존 로그인 방식(이메일/카카오)으로 로그인해주세요.`);
+      alert(`'${name}' 이름으로 이미 가입한 담당자가 있습니다.\n동명이인이라면 이름 뒤에 구분 표시를 붙여 가입해주세요. (예: ${name}B, ${name}(부천))\n본인 계정이라면 기존 로그인 방식(이메일/카카오)으로 로그인해주세요.\n\n[확인용] 충돌 문서: staff/${other.id} · 이메일: ${other.data().email || '없음'} · 프로젝트: ${firebaseConfig.projectId}`);
       return;
     }
   } catch (err) {
