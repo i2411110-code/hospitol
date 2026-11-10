@@ -124,6 +124,9 @@
         <button onclick="switchTab('new-registration')" id="tab-new-registration" class="tab-btn px-4 py-3 text-sm font-semibold text-gray-600 hover:text-indigo-700">
           <i class="fa-solid fa-user-plus mr-1"></i> 신규 접수
         </button>
+        <button onclick="switchTab('daily')" id="tab-daily" class="tab-btn px-4 py-3 text-sm font-semibold text-gray-600 hover:text-indigo-700">
+          <i class="fa-solid fa-clipboard-list mr-1"></i> 일일 보험조회현황
+        </button>
         <button onclick="switchTab('required-docs')" id="tab-required-docs" class="tab-btn px-4 py-3 text-sm font-semibold text-gray-600 hover:text-indigo-700">
           <i class="fa-solid fa-folder-open mr-1"></i> 청구 시 필요 서류
         </button>
@@ -137,31 +140,6 @@
 
       <!-- 고객 조회 (첫 화면) -->
       <div id="view-lookup" class="tab-content block">
-        <!-- 일일 보험조회현황 (카톡 마감 보고용) -->
-        <div class="bg-white rounded-2xl p-6 shadow-sm border mb-6">
-          <div class="flex flex-wrap items-end justify-between gap-3 pb-4 mb-4 border-b">
-            <div>
-              <h2 class="text-xl font-bold text-gray-900"><i class="fa-solid fa-clipboard-list text-indigo-600 mr-2"></i>일일 보험조회현황</h2>
-              <p class="text-xs text-gray-500 mt-1">입력한 방문 기록으로 자동 집계됩니다. 복사해서 카톡에 바로 붙여넣으세요.</p>
-            </div>
-            <div class="flex flex-wrap items-center gap-2">
-              <input type="date" id="dailyDate" class="border rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
-              <select id="dailyScope" class="border rounded-lg px-2 py-1.5 text-sm outline-none"></select>
-              <input type="text" id="dailyReporter" placeholder="보고자 이름" class="border rounded-lg px-2 py-1.5 text-sm w-24 outline-none focus:ring-2 focus:ring-indigo-500">
-              <button type="button" id="btnDailyRefresh" class="px-3 py-1.5 text-sm font-bold bg-slate-100 rounded-lg hover:bg-slate-200"><i class="fa-solid fa-rotate"></i></button>
-            </div>
-          </div>
-          <div class="grid grid-cols-3 gap-3 mb-4 text-center">
-            <div class="bg-slate-50 border rounded-xl py-3"><div class="text-xs font-bold text-gray-500">총원</div><div class="text-2xl font-extrabold text-gray-900" id="dailyTotal">0</div></div>
-            <div class="bg-indigo-50 border border-indigo-100 rounded-xl py-3"><div class="text-xs font-bold text-indigo-700">신규조회</div><div class="text-2xl font-extrabold text-indigo-900" id="dailyNew">0</div></div>
-            <div class="bg-amber-50 border border-amber-100 rounded-xl py-3"><div class="text-xs font-bold text-amber-700">재방문</div><div class="text-2xl font-extrabold text-amber-900" id="dailyRevisit">0</div></div>
-          </div>
-          <pre id="dailyReportText" class="bg-slate-50 border rounded-xl p-4 text-sm whitespace-pre-wrap font-sans leading-relaxed text-gray-800"></pre>
-          <button type="button" id="btnCopyReport" class="mt-3 w-full py-2.5 font-bold rounded-xl shadow transition" style="background-color:#FEE500; color:#181600;">
-            <i class="fa-solid fa-copy mr-1"></i>카톡용 복사
-          </button>
-        </div>
-
         <div class="bg-white rounded-2xl p-6 shadow-sm border">
           <div class="pb-4 mb-6 border-b">
             <h2 class="text-xl font-bold text-gray-900"><i class="fa-solid fa-magnifying-glass text-indigo-600 mr-2"></i>고객 조회</h2>
@@ -197,7 +175,7 @@
           <div class="flex justify-between items-center pb-4 mb-6 border-b">
             <div>
               <h2 class="text-xl font-bold text-gray-900"><i class="fa-solid fa-user-plus text-indigo-600 mr-2"></i>신규 고객 접수</h2>
-              <p class="text-xs text-gray-500 mt-1">성함 / 주민등록번호 / 휴대폰 중 2가지 이상이 이미 등록된 고객과 같으면 먼저 등록한 담당자가 우선입니다.</p>
+              <p class="text-xs text-gray-500 mt-1">성함 / 주민등록번호 / 휴대폰 중 2가지 이상이 이미 등록된 고객과 같으면 먼저 등록한 담당자가 우선입니다. 아래 방문 기록도 함께 입력할 수 있습니다.</p>
             </div>
             <span class="bg-indigo-100 text-indigo-800 text-xs font-bold px-3 py-1 rounded-full">신규 세션</span>
           </div>
@@ -226,6 +204,7 @@
               <label class="block text-xs font-bold text-gray-700 mb-1">주소</label>
               <input type="text" id="reg-address" placeholder="서울특별시 강남구..." class="w-full border rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-indigo-500 outline-none">
             </div>
+            <div id="regVisitMount" class="md:col-span-2"></div>
             <div class="md:col-span-2">
               <button type="submit" id="btnRegister" class="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl shadow hover:bg-indigo-700 transition disabled:opacity-60">
                 <i class="fa-solid fa-user-check mr-1"></i> 신규 고객 등록
@@ -233,6 +212,33 @@
             </div>
             <div id="registerResult" class="md:col-span-2"></div>
           </form>
+        </div>
+      </div>
+
+      <!-- 일일 보험조회현황 (카톡 마감 보고용) -->
+      <div id="view-daily" class="tab-content hidden">
+        <div class="bg-white rounded-2xl p-6 shadow-sm border mb-6">
+          <div class="flex flex-wrap items-end justify-between gap-3 pb-4 mb-4 border-b">
+            <div>
+              <h2 class="text-xl font-bold text-gray-900"><i class="fa-solid fa-clipboard-list text-indigo-600 mr-2"></i>일일 보험조회현황</h2>
+              <p class="text-xs text-gray-500 mt-1">입력한 방문 기록으로 자동 집계됩니다. 복사해서 카톡에 바로 붙여넣으세요.</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <input type="date" id="dailyDate" class="border rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+              <select id="dailyScope" class="border rounded-lg px-2 py-1.5 text-sm outline-none"></select>
+              <input type="text" id="dailyReporter" placeholder="보고자 이름" class="border rounded-lg px-2 py-1.5 text-sm w-24 outline-none focus:ring-2 focus:ring-indigo-500">
+              <button type="button" id="btnDailyRefresh" class="px-3 py-1.5 text-sm font-bold bg-slate-100 rounded-lg hover:bg-slate-200"><i class="fa-solid fa-rotate"></i></button>
+            </div>
+          </div>
+          <div class="grid grid-cols-3 gap-3 mb-4 text-center">
+            <div class="bg-slate-50 border rounded-xl py-3"><div class="text-xs font-bold text-gray-500">총원</div><div class="text-2xl font-extrabold text-gray-900" id="dailyTotal">0</div></div>
+            <div class="bg-indigo-50 border border-indigo-100 rounded-xl py-3"><div class="text-xs font-bold text-indigo-700">신규조회</div><div class="text-2xl font-extrabold text-indigo-900" id="dailyNew">0</div></div>
+            <div class="bg-amber-50 border border-amber-100 rounded-xl py-3"><div class="text-xs font-bold text-amber-700">재방문</div><div class="text-2xl font-extrabold text-amber-900" id="dailyRevisit">0</div></div>
+          </div>
+          <pre id="dailyReportText" class="bg-slate-50 border rounded-xl p-4 text-sm whitespace-pre-wrap font-sans leading-relaxed text-gray-800"></pre>
+          <button type="button" id="btnCopyReport" class="mt-3 w-full py-2.5 font-bold rounded-xl shadow transition" style="background-color:#FEE500; color:#181600;">
+            <i class="fa-solid fa-copy mr-1"></i>카톡용 복사
+          </button>
         </div>
       </div>
 

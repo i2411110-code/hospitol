@@ -270,6 +270,7 @@ async function loadStaffProfile() {
   teamTabBtn.classList.toggle('hidden', currentStaff.role !== 'lead');
 
   initDailyControls();
+  mountRegVisit();
   switchTab('lookup');
 }
 
@@ -293,10 +294,8 @@ window.switchTab = function switchTab(tabId) {
 
   if (tabId === 'team-overview') renderTeamOverview();
   if (tabId === 'my-patients') renderMyPatients();
-  if (tabId === 'lookup') {
-    $('lookupName').focus();
-    renderDailyReport();
-  }
+  if (tabId === 'lookup') $('lookupName').focus();
+  if (tabId === 'daily') renderDailyReport();
 };
 
 /* ---------------------------------------------------------
@@ -465,14 +464,44 @@ function policyRowHtml(x = {}) {
     </div>`;
 }
 
+// 실손정보는 고객 단위로 한 번만 입력합니다.
+// 이미 입력된 기록이 있으면 그 내용을 보여주고(수정 불가), 한 번도 입력된 적이 없을 때만 입력란을 엽니다.
+function findSilsonSource(pid) {
+  const list = visitsCache.get(pid) || [];
+  return list.find(x => x.noSilson || x.policies?.length) || null;
+}
+function silsonSectionHtml(p, v) {
+  const src = findSilsonSource(p.id);
+  const editable = !src || (v && src.id === v.id);
+  if (!editable) {
+    return `
+      <div>
+        <p class="text-xs font-bold text-gray-500 mb-1">실손정보 <span class="font-normal text-gray-400">(이미 입력된 정보${src.visitDate ? ' · ' + esc(src.visitDate) + ' 기록' : ''})</span></p>
+        <div class="border rounded-lg bg-white p-2">
+          ${src.noSilson ? '<p class="text-xs text-amber-700 font-bold">실손 미가입</p>' : renderPolicies(src.policies)}
+        </div>
+      </div>`;
+  }
+  const policies = v?.policies?.length ? v.policies : [{}];
+  return `
+      <div data-silson-editable>
+        <div class="flex items-center justify-between mb-1">
+          <p class="text-xs font-bold text-gray-500">실손정보 <span class="font-normal text-gray-400">(처음 한 번만 입력)</span></p>
+          <label class="flex items-center gap-1 text-xs text-amber-700 font-bold"><input type="checkbox" data-f="noSilson" ${v?.noSilson ? 'checked' : ''}> 실손 미가입</label>
+        </div>
+        <div data-policies-wrap class="${v?.noSilson ? 'hidden' : ''}">
+          <div data-policies class="space-y-2">${policies.map(policyRowHtml).join('')}</div>
+          <button type="button" data-action="add-policy" class="mt-2 text-xs font-bold text-indigo-700 hover:underline"><i class="fa-solid fa-plus mr-0.5"></i>보험 추가</button>
+        </div>
+      </div>`;
+}
+
 function visitFormHtml(p, v) {
   const isEdit = !!v;
   const key = v ? (v.visitDateKey || legacyKey(v)) : toDateKey(new Date());
-  const guess = birthGenderFromMasked(p.ssnMasked);
   const hasVisits = (visitsCache.get(p.id) || []).length > 0;
   const kind = v?.kind || (hasVisits ? '재방문' : '신규');
   const type = v?.type || '조회';
-  const policies = v?.policies?.length ? v.policies : [{}];
   return `
     <form data-form="visit" data-visit-id="${esc(v?.id || '')}" class="border-2 border-indigo-200 rounded-xl p-4 bg-indigo-50/40 space-y-4">
       <h5 class="font-bold text-sm text-indigo-900">${isEdit ? '방문 기록 수정' : '방문 기록 추가'} · ${esc(p.name)}</h5>
@@ -493,25 +522,7 @@ function visitFormHtml(p, v) {
         </label>
       </div>
 
-      <div>
-        <p class="text-xs font-bold text-gray-500 mb-1">고객정보</p>
-        <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
-          <div><label class="block text-[11px] text-gray-600 mb-0.5">생년월일</label><input type="text" data-f="birth" value="${esc(v?.birth ?? guess.birth)}" placeholder="1990.01.01" class="${INP}"></div>
-          <div><label class="block text-[11px] text-gray-600 mb-0.5">성별</label><select data-f="gender" class="${INP}"><option value=""></option>${opts(['남', '여'], v?.gender ?? guess.gender)}</select></div>
-          <div class="col-span-2 sm:col-span-1"><label class="block text-[11px] text-gray-600 mb-0.5">전화번호</label><input type="tel" data-f="phone" value="${esc(v?.phone ? formatPhoneInput(v.phone) : '')}" placeholder="010-0000-0000" class="${INP}"></div>
-        </div>
-      </div>
-
-      <div>
-        <div class="flex items-center justify-between mb-1">
-          <p class="text-xs font-bold text-gray-500">실손정보</p>
-          <label class="flex items-center gap-1 text-xs text-amber-700 font-bold"><input type="checkbox" data-f="noSilson" ${v?.noSilson ? 'checked' : ''}> 실손 미가입</label>
-        </div>
-        <div data-policies-wrap class="${v?.noSilson ? 'hidden' : ''}">
-          <div data-policies class="space-y-2">${policies.map(policyRowHtml).join('')}</div>
-          <button type="button" data-action="add-policy" class="mt-2 text-xs font-bold text-indigo-700 hover:underline"><i class="fa-solid fa-plus mr-0.5"></i>보험 추가</button>
-        </div>
-      </div>
+      ${silsonSectionHtml(p, v)}
 
       <div>
         <label class="block text-xs font-bold text-gray-500 mb-1">상담내용 (보장빈틈 / 갱신여부 / 실조회자 이름, 특이사항 등)</label>
@@ -542,18 +553,13 @@ async function openVisitPanel(card, pid, visitId) {
   panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
-async function submitVisitForm(form, card, pid) {
-  const p = patientMap.get(pid);
-  const f = (k) => form.querySelector(`[data-f="${k}"]`);
-  const msg = form.querySelector('[data-form-msg]');
-  msg.textContent = '';
-
-  const key = f('visitDateKey').value;
-  if (!key) { msg.textContent = '방문날짜를 입력해주세요.'; return; }
-
+// 방문 기록 입력란(root 안의 data-f 값들)을 읽어 공통 필드로 만듭니다 (방문 기록 폼 / 신규 접수 폼 공용)
+function readVisitFields(root) {
+  const f = (k) => root.querySelector(`[data-f="${k}"]`);
   const type = f('type').value;
-  const noSilson = f('noSilson').checked;
-  const policies = noSilson ? [] : Array.from(form.querySelectorAll('.policy-row')).map(r => {
+  const silsonEditable = !!root.querySelector('[data-silson-editable]');
+  const noSilson = silsonEditable && f('noSilson').checked;
+  const policies = (!silsonEditable || noSilson) ? [] : Array.from(root.querySelectorAll('.policy-row')).map(r => {
     const g = (k) => r.querySelector(`[data-f="${k}"]`);
     return {
       insurer: g('insurer').value.trim(),
@@ -568,14 +574,7 @@ async function submitVisitForm(form, card, pid) {
   }).filter(x => x.insurer || x.joinDate || x.illnessInpatient || x.injuryInpatient ||
                  x.illnessOutpatient || x.injuryOutpatient || x.nonCovered);
 
-  const data = {
-    patientId: pid,
-    patientName: p.name,
-    staffName: p.staffName,      // 담당자(고객 등록자) — 일일 현황 집계 기준
-    teamId: p.teamId,
-    recordedBy: currentStaff.name,
-    visitDateKey: key,
-    visitDate: fmtVisitDate(key),
+  const out = {
     worker: f('worker').value.trim(),
     kind: f('kind').value,
     type,
@@ -583,14 +582,102 @@ async function submitVisitForm(form, card, pid) {
     admission: f('admission').value,
     bodyPart: f('bodyPart').value.trim(),
     treatment: f('treatment').value.trim(),
-    birth: f('birth').value.trim(),
-    gender: f('gender').value,
-    phone: digitsOnly(f('phone').value),
-    noSilson,
-    policies,
-    memo: f('memo').value.trim(),
+    memo: f('memo').value.trim()
+  };
+  // 고객정보(생년월일/성별/전화번호)는 신규 접수 폼에만 있습니다
+  if (f('birth')) out.birth = f('birth').value.trim();
+  if (f('gender')) out.gender = f('gender').value;
+  if (f('phone')) out.phone = digitsOnly(f('phone').value);
+  // 실손정보는 아직 입력된 적이 없을 때만 이 기록에 저장합니다 (이미 있으면 기존 값을 그대로 둡니다)
+  if (silsonEditable) { out.noSilson = noSilson; out.policies = policies; }
+  return out;
+}
+
+function visitDocFor(p, fields, key) {
+  return {
+    patientId: p.id,
+    patientName: p.name,
+    staffName: p.staffName,      // 담당자(고객 등록자) — 일일 현황 집계 기준
+    teamId: p.teamId,
+    recordedBy: currentStaff.name,
+    visitDateKey: key,
+    visitDate: fmtVisitDate(key),
+    ...fields,
     updatedAt: serverTimestamp()
   };
+}
+
+// 신규 접수 화면(신규 접수 탭 / 동명이인 접수)에 들어가는 방문 기록 입력란
+function regVisitHtml() {
+  return `
+    <div data-regvisit class="border-2 border-indigo-200 rounded-xl p-4 bg-indigo-50/40 space-y-4">
+      <div>
+        <h5 class="font-bold text-sm text-indigo-900">방문 기록</h5>
+        <p class="text-[11px] text-gray-500 mt-0.5">접수와 동시에 오늘 날짜의 방문 기록으로 저장되며, 일일 보험조회현황에 바로 반영됩니다.</p>
+      </div>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <div><label class="block text-[11px] text-gray-600 mb-0.5">근무자</label><input type="text" data-f="worker" value="${esc(currentStaff?.name)}" class="${INP}"></div>
+        <div><label class="block text-[11px] text-gray-600 mb-0.5">신규/재방문</label><select data-f="kind" class="${INP}">${opts(['신규', '재방문'], '신규')}</select></div>
+        <div><label class="block text-[11px] text-gray-600 mb-0.5">조회 or 청구</label><select data-f="type" class="${INP}">${opts(['조회', '청구'], '조회')}</select></div>
+        <div><label class="block text-[11px] text-gray-600 mb-0.5">통원 or 입원</label><select data-f="admission" class="${INP}">${opts(['통원', '입원'], '통원')}</select></div>
+        <div class="col-span-2"><label class="block text-[11px] text-gray-600 mb-0.5">치료부위</label><input type="text" data-f="bodyPart" placeholder="왼쪽 손목" class="${INP}"></div>
+        <div class="col-span-2"><label class="block text-[11px] text-gray-600 mb-0.5">치료내용</label><input type="text" data-f="treatment" placeholder="수술" class="${INP}"></div>
+      </div>
+      <label data-claim-wrap class="hidden items-center gap-1.5 text-xs font-bold text-emerald-800">
+        <input type="checkbox" data-f="claimDone"> 청구 완료 (일일 현황 "보험금 청구현황"에 '청구완료'로 표시)
+      </label>
+
+      <div>
+        <p class="text-xs font-bold text-gray-500 mb-1">고객정보 <span class="font-normal text-gray-400">(주민번호·휴대폰을 입력하면 자동으로 채워지며, 직접 고칠 수 있습니다)</span></p>
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          <div><label class="block text-[11px] text-gray-600 mb-0.5">생년월일</label><input type="text" data-f="birth" placeholder="1990.01.01" class="${INP}"></div>
+          <div><label class="block text-[11px] text-gray-600 mb-0.5">성별</label><select data-f="gender" class="${INP}"><option value=""></option>${opts(['남', '여'], '')}</select></div>
+          <div class="col-span-2 sm:col-span-1"><label class="block text-[11px] text-gray-600 mb-0.5">전화번호</label><input type="tel" data-f="phone" placeholder="010-0000-0000" class="${INP}"></div>
+        </div>
+      </div>
+
+      ${silsonSectionHtml({ id: '' }, null)}
+
+      <div>
+        <label class="block text-xs font-bold text-gray-500 mb-1">상담내용 (보장빈틈 / 갱신여부 / 실조회자 이름, 특이사항 등)</label>
+        <textarea data-f="memo" rows="3" class="${INP}"></textarea>
+      </div>
+    </div>`;
+}
+
+function mountRegVisit() {
+  const m = $('regVisitMount');
+  if (m && currentStaff) m.innerHTML = regVisitHtml();
+}
+
+// 주민번호/휴대폰 입력 시 생년월일·성별·전화번호를 자동으로 채움 (직접 고친 칸은 건드리지 않음)
+function syncRegVisitFields(form) {
+  if (!form) return;
+  const ssnEl = form.querySelector('#reg-ssn, #dup-ssn');
+  const phoneEl = form.querySelector('#reg-phone, #dup-phone');
+  const set = (k, v) => {
+    const el = form.querySelector(`[data-f="${k}"]`);
+    if (el && !el.dataset.touched) el.value = v;
+  };
+  const d = digitsOnly(ssnEl?.value);
+  if (d.length >= 7) {
+    const g = birthGenderFromMasked(`${d.slice(0, 6)}-${d[6]}`);
+    set('birth', g.birth);
+    set('gender', g.gender);
+  }
+  set('phone', formatPhoneInput(phoneEl?.value));
+}
+
+async function submitVisitForm(form, card, pid) {
+  const p = patientMap.get(pid);
+  const f = (k) => form.querySelector(`[data-f="${k}"]`);
+  const msg = form.querySelector('[data-form-msg]');
+  msg.textContent = '';
+
+  const key = f('visitDateKey').value;
+  if (!key) { msg.textContent = '방문날짜를 입력해주세요.'; return; }
+
+  const data = visitDocFor(p, readVisitFields(form), key);
 
   const submitBtn = form.querySelector('button[type="submit"]');
   submitBtn.disabled = true;
@@ -714,13 +801,6 @@ async function onCardClick(e) {
     return;
   }
 
-  const card = btn.closest('[data-card]');
-  if (!card) return;
-  const pid = card.dataset.card;
-  const p = patientMap.get(pid);
-  if (!p) return;
-
-  if (act === 'cancel-panel') { card.querySelector('[data-panel]').innerHTML = ''; return; }
   if (act === 'add-policy') {
     btn.closest('[data-policies-wrap]').querySelector('[data-policies]').insertAdjacentHTML('beforeend', policyRowHtml());
     return;
@@ -732,6 +812,13 @@ async function onCardClick(e) {
     return;
   }
 
+  const card = btn.closest('[data-card]');
+  if (!card) return;
+  const pid = card.dataset.card;
+  const p = patientMap.get(pid);
+  if (!p) return;
+
+  if (act === 'cancel-panel') { card.querySelector('[data-panel]').innerHTML = ''; return; }
   if (['edit-visit', 'delete-visit', 'edit-patient', 'delete-patient'].includes(act) && !isMine(p)) {
     alert('본인 고객만 수정/삭제할 수 있습니다.');
     return;
@@ -775,6 +862,8 @@ function onCardInput(e) {
   const t = e.target;
   if (t.id === 'dup-ssn') t.value = formatSsnInput(t.value);
   if (t.id === 'dup-phone' || t.matches('input[data-f="phone"]')) t.value = formatPhoneInput(t.value);
+  if (t.matches('[data-f="birth"], [data-f="gender"], [data-f="phone"]')) t.dataset.touched = '1';
+  if (['reg-ssn', 'reg-phone', 'dup-ssn', 'dup-phone'].includes(t.id)) syncRegVisitFields(t.closest('form'));
 }
 
 function wireCardRoot(root) {
@@ -843,6 +932,23 @@ async function registerPatient({ name, ssn, phone, carrier, address }) {
   });
 }
 
+// 신규 접수 + 첫 방문 기록 저장 (이미 등록된 고객이면 방문 기록은 만들지 않음)
+async function registerWithVisit(root, input) {
+  const r = await registerPatient(input);
+  if (r.duplicate) return r;
+  const p = { id: r.id, name: input.name, staffName: currentStaff.name, teamId: currentStaff.teamId };
+  try {
+    const fields = readVisitFields(root);
+    await addDoc(collection(db, 'patients', r.id, 'visits'), {
+      ...visitDocFor(p, fields, toDateKey(new Date())),
+      createdAt: serverTimestamp()
+    });
+  } catch (err) {
+    r.visitError = err.message;
+  }
+  return r;
+}
+
 const MSG_STYLES = {
   ok: 'bg-emerald-50 border-emerald-200 text-emerald-900',
   dup: 'bg-amber-50 border-amber-300 text-amber-900',
@@ -870,7 +976,9 @@ function outcomeHtml(r) {
   return messageHtml('ok', `
     <p class="font-bold text-base"><i class="fa-solid fa-circle-check mr-1"></i>신규 고객으로 등록되었습니다.</p>
     <p class="mt-1">담당자 : <strong>${esc(currentStaff.name)} ${roleLabel(currentStaff.role)}</strong></p>
-    ${visitBtnHtml(r.id, '방문 기록 바로 입력')}`);
+    ${r.visitError
+      ? `<p class="mt-2 text-xs text-red-700">방문 기록 저장에 실패했습니다 (${esc(r.visitError)}). 아래 버튼으로 다시 입력해주세요.</p>${visitBtnHtml(r.id, '방문 기록 바로 입력')}`
+      : '<p class="mt-1 text-xs opacity-80">방문 기록도 함께 저장되었습니다.</p>'}`);
 }
 
 // 접수 직후 "방문 기록 입력" → 내 고객 탭에서 해당 고객의 입력 폼을 자동으로 엽니다
@@ -942,6 +1050,7 @@ function dupSectionHtml(rawName) {
           <div><label class="block text-xs font-bold text-gray-700 mb-1">휴대폰 *</label><input type="tel" id="dup-phone" required placeholder="010-0000-0000" class="${INP}"></div>
           <div><label class="block text-xs font-bold text-gray-700 mb-1">통신사</label><select id="dup-carrier" class="${INP}">${opts(CARRIERS, 'SKT')}</select></div>
           <div class="sm:col-span-2"><label class="block text-xs font-bold text-gray-700 mb-1">주소</label><input type="text" id="dup-address" class="${INP}"></div>
+          <div class="sm:col-span-2">${regVisitHtml()}</div>
           <div class="sm:col-span-2"><button type="submit" id="btnDupRegister" class="w-full py-2.5 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 disabled:opacity-60"><i class="fa-solid fa-user-check mr-1"></i>동명이인 신규 등록</button></div>
           <div id="dupResult" class="sm:col-span-2"></div>
         </form>
@@ -1025,7 +1134,7 @@ lookupResult.addEventListener('submit', async (e) => {
   const btn = $('btnDupRegister');
   btn.disabled = true;
   try {
-    const r = await registerPatient(input);
+    const r = await registerWithVisit($('dupForm'), input);
     if (r.duplicate) {
       out.innerHTML = outcomeHtml(r);
     } else {
@@ -1049,6 +1158,7 @@ regPhone.addEventListener('input', () => { regPhone.value = formatPhoneInput(reg
 
 const registerResult = $('registerResult');
 const btnRegister = $('btnRegister');
+wireCardRoot($('registerForm'));
 
 $('registerForm').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -1067,9 +1177,9 @@ $('registerForm').addEventListener('submit', async (e) => {
 
   btnRegister.disabled = true;
   try {
-    const r = await registerPatient(input);
+    const r = await registerWithVisit($('registerForm'), input);
     registerResult.innerHTML = outcomeHtml(r);
-    if (!r.duplicate) e.target.reset();
+    if (!r.duplicate) { e.target.reset(); mountRegVisit(); }
   } catch (err) {
     registerResult.innerHTML = messageHtml('err', '등록 중 오류가 발생했습니다: ' + esc(err.message));
   } finally {
@@ -1142,6 +1252,7 @@ function drawDailyReport() {
 
 async function renderDailyReport() {
   if (!currentStaff) return;
+  if ($('view-daily').classList.contains('hidden')) return; // 일일 현황 탭을 열 때 불러옵니다
   const pre = $('dailyReportText');
   const key = $('dailyDate').value || toDateKey(new Date());
   const scope = $('dailyScope').value;
