@@ -43,6 +43,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 const $ = (id) => document.getElementById(id);
+const notifyTray = $('notifyTray');
 const digitsOnly = (s) => String(s ?? '').replace(/\D/g, '');
 const normName = (s) => String(s ?? '').replace(/\s+/g, '');
 const roleLabel = (role) => (role === 'lead' ? '팀장' : '팀원');
@@ -244,6 +245,7 @@ onAuthStateChanged(auth, async (user) => {
     loginView.classList.remove('hidden');
     appRoot.classList.add('hidden');
     setupView.classList.add('hidden');
+    notifyTray.innerHTML = '';
     return;
   }
   loginView.classList.add('hidden');
@@ -272,6 +274,7 @@ async function loadStaffProfile() {
   initDailyControls();
   mountRegVisit();
   switchTab('lookup');
+  loadNotifications();
 }
 
 /* ---------------------------------------------------------
@@ -314,6 +317,8 @@ const opts = (list, sel) => {
 
 const patientMap = new Map();   // patientId -> patient data (렌더된 카드 기준)
 const visitsCache = new Map();  // patientId -> visits[]
+const commentsCache = new Map(); // patientId -> comments[] (담당자/팀장만 조회 가능)
+let pendingOpenVisitsFor = null; // 알림 '보러가기'로 방문 기록을 자동으로 펼칠 고객
 let pendingVisitFor = null;     // 신규 접수 직후 방문 기록 폼을 자동으로 열 고객
 
 function isMine(p) {
@@ -344,14 +349,15 @@ function cardHtml(p, { badge = true } = {}) {
         <p class="text-sm font-bold text-indigo-700 mt-0.5">${staffLine(p)}</p>
         <p class="text-xs text-gray-400 mt-1" data-info="${id}">${infoLine(p)}</p>
       </div>
-      ${canSee ? `
       <div class="flex flex-wrap gap-x-4 gap-y-1 mt-3 text-xs font-bold">
+        ${canSee ? `
         <button type="button" data-action="toggle-visits" class="text-indigo-700 hover:underline">방문 기록 보기</button>
-        <button type="button" data-action="add-visit" class="text-emerald-700 hover:underline"><i class="fa-solid fa-plus mr-0.5"></i>방문 기록 추가</button>
+        <button type="button" data-action="add-visit" class="text-emerald-700 hover:underline"><i class="fa-solid fa-plus mr-0.5"></i>방문 기록 추가</button>` : ''}
+        <button type="button" data-action="add-comment" class="text-amber-700 hover:underline"><i class="fa-regular fa-comment mr-0.5"></i>코멘트 남기기</button>
         ${mine ? `
         <button type="button" data-action="edit-patient" class="text-gray-600 hover:underline">고객 정보 수정</button>
         <button type="button" data-action="delete-patient" class="text-red-600 hover:underline">고객 삭제</button>` : ''}
-      </div>` : ''}
+      </div>
       <div data-panel="${id}" class="mt-3"></div>
       <div data-visits-box="${id}" class="mt-2"></div>
     </div>`;
@@ -383,10 +389,27 @@ function sortVisits(list) {
   });
 }
 
+// 코멘트 목록은 담당자/팀장만 읽을 수 있습니다 (Firestore 규칙과 같은 조건)
+async function loadComments(pid) {
+  const p = patientMap.get(pid);
+  if (!p || !(isMine(p) || isLeadOf(p))) { commentsCache.set(pid, []); return []; }
+  try {
+    const snap = await getDocs(collection(db, 'patients', pid, 'comments'));
+    const list = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
+    commentsCache.set(pid, list);
+    return list;
+  } catch (err) {
+    commentsCache.set(pid, []);
+    return [];
+  }
+}
+
 async function loadVisits(pid) {
   const snap = await getDocs(collection(db, 'patients', pid, 'visits'));
   const list = sortVisits(snap.docs.map(d => ({ id: d.id, ...d.data() })));
   visitsCache.set(pid, list);
+  await loadComments(pid);
   return list;
 }
 
@@ -413,11 +436,32 @@ function visitHtml(p, v) {
     </div>`;
 }
 
+function commentHtml(p, c) {
+  const canDel = isMine(p) || c.authorUid === currentUser.uid;
+  return `
+    <div class="border border-amber-200 rounded-lg p-3 bg-amber-50 mb-2 text-xs text-gray-700">
+      <div class="flex flex-wrap gap-x-2 items-center">
+        <i class="fa-regular fa-comment text-amber-600"></i>
+        <span class="font-bold text-gray-900">${esc(c.author)}</span>
+        ${c.tag ? `<span class="bg-amber-200 text-amber-900 font-bold px-1.5 py-0.5 rounded">${esc(c.tag)}</span>` : ''}
+        <span class="text-gray-400">${esc(formatDate(c.createdAt))}</span>
+        ${canDel ? `<button type="button" data-action="delete-comment" data-comment-id="${esc(c.id)}" class="ml-auto text-red-600 font-bold hover:underline">삭제</button>` : ''}
+      </div>
+      <p class="mt-1.5 whitespace-pre-wrap leading-relaxed">${esc(c.text)}</p>
+    </div>`;
+}
+
 function visitsHtml(pid) {
   const p = patientMap.get(pid);
-  const list = visitsCache.get(pid) || [];
-  if (!list.length) return '<p class="text-xs text-gray-400">방문 기록이 없습니다.</p>';
-  return list.map(v => visitHtml(p, v)).join('');
+  const comments = commentsCache.get(pid) || [];
+  const visits = visitsCache.get(pid) || [];
+  const cHtml = comments.length
+    ? `<p class="text-[11px] font-bold text-amber-800 mb-1">코멘트 ${comments.length}건</p>` + comments.map(c => commentHtml(p, c)).join('')
+    : '';
+  const vHtml = visits.length
+    ? visits.map(v => visitHtml(p, v)).join('')
+    : '<p class="text-xs text-gray-400">방문 기록이 없습니다.</p>';
+  return cHtml + vHtml;
 }
 
 // 같은 고객 카드가 여러 화면(고객 조회/내 고객)에 있어도 열려 있는 것만 갱신
@@ -718,6 +762,91 @@ async function deleteVisit(pid, visitId) {
   }
 }
 
+/* ---------- 코멘트 (담당자가 아니어도 작성 가능) ---------- */
+
+function openCommentPanel(card, pid) {
+  const p = patientMap.get(pid);
+  const self = normName(p.staffName) === normName(currentStaff.name);
+  card.querySelector('[data-panel]').innerHTML = `
+    <form data-form="comment" class="border-2 border-amber-200 rounded-xl p-4 bg-amber-50/50 space-y-3">
+      <h5 class="font-bold text-sm text-amber-900">코멘트 남기기 · ${esc(p.name)}</h5>
+      ${self ? '' : `<p class="text-[11px] text-gray-500">담당자 <strong>${esc(p.staffName)}</strong> 님이 다음 로그인 때 알림으로 확인합니다. (작성한 코멘트는 담당자와 팀장만 볼 수 있습니다)</p>`}
+      <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        <div><label class="block text-[11px] text-gray-600 mb-0.5">구분</label>
+          <select data-f="tag" class="${INP}">${opts(['청구 관련', '방문 관련', '기타'], '청구 관련')}</select></div>
+      </div>
+      <textarea data-f="text" rows="3" required maxlength="1000" placeholder="예: 추가 서류 제출해서 청구 완료했습니다." class="${INP}"></textarea>
+      <p data-form-msg class="text-xs text-red-600 min-h-[1rem]"></p>
+      <div class="flex gap-2">
+        <button type="submit" class="px-5 py-2 bg-amber-600 text-white text-sm font-bold rounded-lg hover:bg-amber-700 disabled:opacity-60">코멘트 저장</button>
+        <button type="button" data-action="cancel-panel" class="px-5 py-2 bg-gray-100 text-gray-700 text-sm font-bold rounded-lg hover:bg-gray-200">취소</button>
+      </div>
+    </form>`;
+}
+
+async function submitCommentForm(form, card, pid) {
+  const p = patientMap.get(pid);
+  const msg = form.querySelector('[data-form-msg]');
+  const btn = form.querySelector('button[type="submit"]');
+  const text = form.querySelector('[data-f="text"]').value.trim();
+  const tag = form.querySelector('[data-f="tag"]').value;
+  if (!text) { msg.textContent = '내용을 입력해주세요.'; return; }
+
+  const ownerKey = normName(p.staffName);
+  btn.disabled = true;
+  try {
+    const batch = writeBatch(db);
+    const cRef = doc(collection(db, 'patients', pid, 'comments'));
+    batch.set(cRef, {
+      patientId: pid,
+      patientName: p.name,
+      ownerKey,
+      teamId: p.teamId,
+      author: currentStaff.name,
+      authorUid: currentUser.uid,
+      tag,
+      text,
+      createdAt: serverTimestamp()
+    });
+    // 내가 담당자가 아닐 때만 담당자에게 알림 생성
+    if (ownerKey && ownerKey !== normName(currentStaff.name)) {
+      batch.set(doc(collection(db, 'notifications')), {
+        toKey: ownerKey,
+        patientId: pid,
+        patientName: p.name,
+        commentId: cRef.id,
+        fromName: currentStaff.name,
+        fromUid: currentUser.uid,
+        tag,
+        preview: text.slice(0, 80),
+        seen: false,
+        createdAt: serverTimestamp()
+      });
+    }
+    await batch.commit();
+
+    card.querySelector('[data-panel]').innerHTML = messageHtml('ok', '코멘트를 저장했습니다.');
+    if (isMine(p) || isLeadOf(p)) {
+      await loadComments(pid);
+      refreshVisitBoxes(pid);
+    }
+  } catch (err) {
+    msg.textContent = '저장 중 오류가 발생했습니다: ' + err.message;
+    btn.disabled = false;
+  }
+}
+
+async function deleteComment(pid, cid) {
+  if (!confirm('이 코멘트를 삭제할까요?')) return;
+  try {
+    await deleteDoc(doc(db, 'patients', pid, 'comments', cid));
+    await loadComments(pid);
+    refreshVisitBoxes(pid);
+  } catch (err) {
+    alert('삭제 중 오류가 발생했습니다: ' + err.message);
+  }
+}
+
 /* ---------- 고객 정보 수정 / 삭제 ---------- */
 
 function openPatientEdit(card, pid) {
@@ -760,13 +889,18 @@ async function submitPatientEdit(form, card, pid) {
 
 async function deletePatient(pid) {
   const p = patientMap.get(pid);
-  if (!confirm(`'${p.name}' 고객을 삭제할까요?\n방문 기록도 모두 함께 삭제되며 되돌릴 수 없습니다.`)) return;
+  if (!confirm(`'${p.name}' 고객을 삭제할까요?\n방문 기록·코멘트도 모두 함께 삭제되며 되돌릴 수 없습니다.`)) return;
   try {
     const visitsSnap = await getDocs(collection(db, 'patients', pid, 'visits'));
     const keysSnap = await getDocs(query(collection(db, 'patientKeys'), where('patientId', '==', pid)));
+    const commentsSnap = await getDocs(collection(db, 'patients', pid, 'comments'));
+    const notiSnap = await getDocs(query(collection(db, 'notifications'),
+      where('toKey', '==', normName(currentStaff.name)), where('patientId', '==', pid)));
     // 고객 문서는 마지막에 지웁니다 (보안 규칙이 고객 문서로 소유자를 확인하기 때문)
     const refs = [
       ...visitsSnap.docs.map(d => d.ref),
+      ...commentsSnap.docs.map(d => d.ref),
+      ...notiSnap.docs.map(d => d.ref),
       ...keysSnap.docs.map(d => d.ref),
       doc(db, 'patients', pid)
     ];
@@ -777,6 +911,7 @@ async function deletePatient(pid) {
     }
     patientMap.delete(pid);
     visitsCache.delete(pid);
+    commentsCache.delete(pid);
     document.querySelectorAll(`[data-card="${pid}"]`).forEach(el => el.remove());
     if (myPatientsCache) {
       myPatientsCache = myPatientsCache.filter(x => x.id !== pid);
@@ -819,6 +954,8 @@ async function onCardClick(e) {
   if (!p) return;
 
   if (act === 'cancel-panel') { card.querySelector('[data-panel]').innerHTML = ''; return; }
+  if (act === 'add-comment') return openCommentPanel(card, pid);
+  if (act === 'delete-comment') return deleteComment(pid, btn.dataset.commentId);
   if (['edit-visit', 'delete-visit', 'edit-patient', 'delete-patient'].includes(act) && !isMine(p)) {
     alert('본인 고객만 수정/삭제할 수 있습니다.');
     return;
@@ -844,6 +981,7 @@ function onCardSubmit(e) {
   if (!card) return;
   const pid = card.dataset.card;
   if (form.dataset.form === 'visit') submitVisitForm(form, card, pid);
+  if (form.dataset.form === 'comment') submitCommentForm(form, card, pid);
   if (form.dataset.form === 'patient-edit') submitPatientEdit(form, card, pid);
 }
 
@@ -1023,6 +1161,12 @@ function drawMyPatients() {
     pendingVisitFor = null;
     const card = body.querySelector(`[data-card="${pid}"]`);
     if (card) openVisitPanel(card, pid, null);
+  }
+  if (pendingOpenVisitsFor) {
+    const pid = pendingOpenVisitsFor;
+    pendingOpenVisitsFor = null;
+    const btn = body.querySelector(`[data-card="${pid}"] [data-action="toggle-visits"]`);
+    if (btn) { btn.click(); btn.closest('[data-card]').scrollIntoView({ behavior: 'smooth', block: 'center' }); }
   }
 }
 $('myPatientsFilter').addEventListener('input', drawMyPatients);
@@ -1302,6 +1446,77 @@ $('btnCopyReport').addEventListener('click', async () => {
   const orig = btn.innerHTML;
   btn.innerHTML = '<i class="fa-solid fa-check mr-1"></i>복사됨 — 카톡에 붙여넣으세요';
   setTimeout(() => { btn.innerHTML = orig; }, 1800);
+});
+
+/* ---------------------------------------------------------
+   로그인 시 하단 알림 (다른 담당자가 내 고객에 코멘트를 남긴 경우)
+   - notifications 문서의 seen 이 false 인 것만 보여줍니다.
+   - '확인'(또는 '보러가기')을 누르면 seen:true 로 저장되어 다음 로그인부터는 다시 뜨지 않습니다.
+--------------------------------------------------------- */
+async function loadNotifications() {
+  notifyTray.innerHTML = '';
+  if (!currentStaff) return;
+  try {
+    const snap = await getDocs(query(
+      collection(db, 'notifications'),
+      where('toKey', '==', normName(currentStaff.name)),
+      where('seen', '==', false)
+    ));
+    const list = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => (a.createdAt?.toMillis?.() ?? 0) - (b.createdAt?.toMillis?.() ?? 0));
+    drawNotifications(list);
+  } catch (err) {
+    console.warn('알림을 불러오지 못했습니다:', err.message);
+  }
+}
+
+function drawNotifications(list) {
+  if (!list.length) { notifyTray.innerHTML = ''; return; }
+  const cards = list.map(n => `
+    <div data-nid="${esc(n.id)}" data-pid="${esc(n.patientId)}" class="bg-white border-2 border-amber-300 rounded-xl shadow-lg p-3 text-xs text-left">
+      <p class="font-bold text-gray-900"><i class="fa-regular fa-comment text-amber-600 mr-1"></i>
+        ${esc(n.patientName)} 고객에 <span class="text-indigo-700">${esc(n.fromName)}</span> 님이 코멘트를 남겼습니다
+        ${n.tag ? `<span class="bg-amber-200 text-amber-900 px-1.5 py-0.5 rounded ml-1">${esc(n.tag)}</span>` : ''}</p>
+      <p class="text-gray-600 mt-1 whitespace-pre-wrap">${esc(n.preview)}</p>
+      <div class="flex gap-3 mt-2 font-bold">
+        <button type="button" data-nact="go" class="text-indigo-700 hover:underline">보러가기</button>
+        <button type="button" data-nact="ack" class="text-gray-600 hover:underline">확인</button>
+      </div>
+    </div>`).join('');
+  const allBtn = list.length > 1
+    ? `<button type="button" data-nact="ack-all" class="w-full py-1.5 bg-gray-800 text-white text-xs font-bold rounded-lg shadow">모두 확인 (${list.length}건)</button>`
+    : '';
+  notifyTray.innerHTML = cards + allBtn;
+}
+
+async function ackNotification(nid) {
+  await updateDoc(doc(db, 'notifications', nid), { seen: true, seenAt: serverTimestamp() });
+  notifyTray.querySelector(`[data-nid="${nid}"]`)?.remove();
+}
+
+notifyTray.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-nact]');
+  if (!b) return;
+  const act = b.dataset.nact;
+  try {
+    if (act === 'ack-all') {
+      const ids = Array.from(notifyTray.querySelectorAll('[data-nid]')).map(el => el.dataset.nid);
+      await Promise.all(ids.map(ackNotification));
+      notifyTray.innerHTML = '';
+      return;
+    }
+    const el = b.closest('[data-nid]');
+    const nid = el.dataset.nid, pid = el.dataset.pid;
+    await ackNotification(nid);
+    if (act === 'go') {
+      pendingOpenVisitsFor = pid;
+      $('myPatientsFilter').value = '';
+      switchTab('my-patients');
+    }
+    if (notifyTray.querySelectorAll('[data-nid]').length < 2) notifyTray.querySelector('[data-nact="ack-all"]')?.remove();
+  } catch (err) {
+    alert('알림 처리 중 오류가 발생했습니다: ' + err.message);
+  }
 });
 
 /* ---------------------------------------------------------
