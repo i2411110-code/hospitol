@@ -137,6 +137,31 @@
 
       <!-- 고객 조회 (첫 화면) -->
       <div id="view-lookup" class="tab-content block">
+        <!-- 일일 보험조회현황 (카톡 마감 보고용) -->
+        <div class="bg-white rounded-2xl p-6 shadow-sm border mb-6">
+          <div class="flex flex-wrap items-end justify-between gap-3 pb-4 mb-4 border-b">
+            <div>
+              <h2 class="text-xl font-bold text-gray-900"><i class="fa-solid fa-clipboard-list text-indigo-600 mr-2"></i>일일 보험조회현황</h2>
+              <p class="text-xs text-gray-500 mt-1">입력한 방문 기록으로 자동 집계됩니다. 복사해서 카톡에 바로 붙여넣으세요.</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <input type="date" id="dailyDate" class="border rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+              <select id="dailyScope" class="border rounded-lg px-2 py-1.5 text-sm outline-none"></select>
+              <input type="text" id="dailyReporter" placeholder="보고자 이름" class="border rounded-lg px-2 py-1.5 text-sm w-24 outline-none focus:ring-2 focus:ring-indigo-500">
+              <button type="button" id="btnDailyRefresh" class="px-3 py-1.5 text-sm font-bold bg-slate-100 rounded-lg hover:bg-slate-200"><i class="fa-solid fa-rotate"></i></button>
+            </div>
+          </div>
+          <div class="grid grid-cols-3 gap-3 mb-4 text-center">
+            <div class="bg-slate-50 border rounded-xl py-3"><div class="text-xs font-bold text-gray-500">총원</div><div class="text-2xl font-extrabold text-gray-900" id="dailyTotal">0</div></div>
+            <div class="bg-indigo-50 border border-indigo-100 rounded-xl py-3"><div class="text-xs font-bold text-indigo-700">신규조회</div><div class="text-2xl font-extrabold text-indigo-900" id="dailyNew">0</div></div>
+            <div class="bg-amber-50 border border-amber-100 rounded-xl py-3"><div class="text-xs font-bold text-amber-700">재방문</div><div class="text-2xl font-extrabold text-amber-900" id="dailyRevisit">0</div></div>
+          </div>
+          <pre id="dailyReportText" class="bg-slate-50 border rounded-xl p-4 text-sm whitespace-pre-wrap font-sans leading-relaxed text-gray-800"></pre>
+          <button type="button" id="btnCopyReport" class="mt-3 w-full py-2.5 font-bold rounded-xl shadow transition" style="background-color:#FEE500; color:#181600;">
+            <i class="fa-solid fa-copy mr-1"></i>카톡용 복사
+          </button>
+        </div>
+
         <div class="bg-white rounded-2xl p-6 shadow-sm border">
           <div class="pb-4 mb-6 border-b">
             <h2 class="text-xl font-bold text-gray-900"><i class="fa-solid fa-magnifying-glass text-indigo-600 mr-2"></i>고객 조회</h2>
