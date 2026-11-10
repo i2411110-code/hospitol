@@ -35,36 +35,49 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'POST 요청만 허용됩니다.' });
   }
 
-  const { code, redirectUri } = req.body || {};
+  const { code, redirectUri, clientId } = req.body || {};
   if (!code || !redirectUri) {
     return res.status(400).json({ error: 'code, redirectUri 값이 필요합니다.' });
   }
 
   const restApiKey = process.env.KAKAO_REST_API_KEY;
-  if (!restApiKey) {
+  if (!restApiKey && !clientId) {
     return res.status(500).json({ error: 'KAKAO_REST_API_KEY 환경변수가 설정되지 않았습니다.' });
   }
 
   try {
     // 1) 인가 코드(code)를 access token으로 교환
-    const tokenParams = new URLSearchParams({
-      grant_type: 'authorization_code',
-      client_id: restApiKey,
-      redirect_uri: redirectUri,
-      code
-    });
-    if (process.env.KAKAO_CLIENT_SECRET) {
-      tokenParams.set('client_secret', process.env.KAKAO_CLIENT_SECRET);
+    // 인가 코드는 "로그인 화면을 띄울 때 사용한 앱 키(client_id)"에 묶여 있습니다.
+    // 프론트의 Kakao.Auth.authorize()는 JavaScript 키로 코드를 발급받으므로,
+    // 토큰 교환도 같은 키(clientId)로 먼저 시도하고, 실패하면 REST API 키로 한 번 더 시도합니다.
+    const candidates = [...new Set([clientId, restApiKey].filter(Boolean))];
+    let tokenData = null;
+    let lastErr = null;
+    for (const cid of candidates) {
+      const tokenParams = new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: cid,
+        redirect_uri: redirectUri,
+        code
+      });
+      if (process.env.KAKAO_CLIENT_SECRET) {
+        tokenParams.set('client_secret', process.env.KAKAO_CLIENT_SECRET);
+      }
+      const tokenRes = await fetch('https://kauth.kakao.com/oauth/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8' },
+        body: tokenParams.toString()
+      });
+      const data = await tokenRes.json().catch(() => ({}));
+      if (tokenRes.ok && data.access_token) { tokenData = data; break; }
+      lastErr = { status: tokenRes.status, ...data, triedClientId: cid === restApiKey ? 'REST_API_KEY' : 'JS_KEY' };
+      console.error('[kakao-auth] token exchange failed', JSON.stringify(lastErr));
     }
-
-    const tokenRes = await fetch('https://kauth.kakao.com/oauth/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: tokenParams.toString()
-    });
-    const tokenData = await tokenRes.json();
-    if (!tokenRes.ok) {
-      return res.status(401).json({ error: '카카오 토큰 교환 실패', detail: tokenData });
+    if (!tokenData) {
+      return res.status(401).json({
+        error: `카카오 토큰 교환 실패 (${lastErr?.error_code || lastErr?.error || 'unknown'}: ${lastErr?.error_description || ''})`,
+        detail: lastErr
+      });
     }
     const accessToken = tokenData.access_token;
 

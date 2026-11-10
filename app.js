@@ -194,7 +194,7 @@ btnKakaoLogin.addEventListener('click', () => {
     const res = await fetch('/api/kakao-auth', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code, redirectUri: KAKAO_REDIRECT_URI })
+      body: JSON.stringify({ code, redirectUri: KAKAO_REDIRECT_URI, clientId: KAKAO_JS_KEY })
     });
     const data = await res.json();
     if (!res.ok) {
@@ -223,6 +223,22 @@ setupForm.addEventListener('submit', async (e) => {
 
   if (!teamId) {
     alert('팀 명단에서 이름을 찾지 못했습니다. 팀 코드를 직접 입력해주세요.');
+    return;
+  }
+
+  // 동명이인 가입 차단: 이 앱은 담당자를 "이름"으로 연결(내 고객/알림/코멘트)하므로,
+  // 이미 같은 이름의 다른 계정이 있으면 서로의 고객·알림이 섞입니다.
+  // 같은 이름이 있으면 구분용 이름(예: 김철수B, 김철수(부천))으로 가입하도록 막습니다.
+  try {
+    const sameName = await getDocs(query(collection(db, 'staff'), where('name', '==', name)));
+    const other = sameName.docs.find(d => d.id !== currentUser.uid);
+    if (other) {
+      alert(`'${name}' 이름으로 이미 가입한 담당자가 있습니다.\n동명이인이라면 이름 뒤에 구분 표시를 붙여 가입해주세요. (예: ${name}B, ${name}(부천))\n본인 계정이라면 기존 로그인 방식(이메일/카카오)으로 로그인해주세요.`);
+      return;
+    }
+  } catch (err) {
+    // 보안 규칙상 다른 직원 문서를 조회할 수 없는 경우: 안전하게 가입을 중단합니다.
+    alert('이름 중복 확인에 실패했습니다. 잠시 후 다시 시도하거나 관리자에게 문의해주세요.\n(' + err.message + ')');
     return;
   }
 
@@ -1082,6 +1098,33 @@ function validateReg({ name, ssn, phone }) {
   return '';
 }
 
+// patientKeys(해시)가 없는 고객(시트 이관 / 키 생성 이전 등록 / 키가 지워진 고객)도 잡기 위한 2차 검사입니다.
+// 고객 문서에 저장된 마스킹 값(주민번호 앞 7자리, 휴대폰 앞3+뒤4)과 성함으로
+// "성함 / 주민번호 / 휴대폰 중 2가지 이상 일치"를 다시 판정합니다.
+async function findDuplicateByMasked({ name, ssn, phone }) {
+  const nk = normName(name);
+  const mSsn = maskSsn(ssn);
+  const mPhone = maskPhone(phone);
+  const [byName, bySsn, byPhone] = await Promise.all([
+    getDocs(query(collection(db, 'patients'), where('nameKey', '==', nk))),
+    getDocs(query(collection(db, 'patients'), where('ssnMasked', '==', mSsn))),
+    getDocs(query(collection(db, 'patients'), where('phoneMasked', '==', mPhone)))
+  ]);
+  const cand = new Map();
+  for (const snap of [byName, bySsn, byPhone]) {
+    snap.docs.forEach(d => cand.set(d.id, { id: d.id, ...d.data() }));
+  }
+  for (const p of cand.values()) {
+    const hitName = normName(p.nameKey || p.name) === nk;
+    const hitSsn = p.ssnMasked === mSsn;
+    const hitPhone = p.phoneMasked === mPhone;
+    if ((hitName ? 1 : 0) + (hitSsn ? 1 : 0) + (hitPhone ? 1 : 0) >= 2) {
+      return { duplicate: true, patientId: p.id, patient: p };
+    }
+  }
+  return null;
+}
+
 async function registerPatient({ name, ssn, phone, carrier, address }) {
   const nk = normName(name);
   const hashes = await Promise.all([
@@ -1093,16 +1136,25 @@ async function registerPatient({ name, ssn, phone, carrier, address }) {
   const keyRefs = hashes.map(h => doc(db, 'patientKeys', h));
   const patientRef = doc(collection(db, 'patients'));
 
+  // 1차: 해시 키 없이 고객 문서의 마스킹 값으로 한 번 더 검사 (동명이인 경로 포함 모든 접수 공통)
+  const masked = await findDuplicateByMasked({ name, ssn, phone });
+  if (masked) return masked;
+
   return runTransaction(db, async (tx) => {
     // 트랜잭션 규칙: 모든 읽기를 먼저, 쓰기는 나중에
     const keySnaps = [];
     for (const ref of keyRefs) keySnaps.push(await tx.get(ref));
-    const hit = keySnaps.find(s => s.exists());
 
-    if (hit) {
-      const existingId = hit.data().patientId;
+    // 키가 있어도 가리키는 고객이 이미 삭제됐다면(고아 키) 중복으로 보지 않고 새 키로 덮어씁니다.
+    let found = null;
+    for (const ks of keySnaps) {
+      if (!ks.exists()) continue;
+      const existingId = ks.data().patientId;
       const pSnap = await tx.get(doc(db, 'patients', existingId));
-      return { duplicate: true, patientId: existingId, patient: pSnap.exists() ? { id: existingId, ...pSnap.data() } : null };
+      if (pSnap.exists()) { found = { existingId, pSnap }; break; }
+    }
+    if (found) {
+      return { duplicate: true, patientId: found.existingId, patient: { id: found.existingId, ...found.pSnap.data() } };
     }
 
     tx.set(patientRef, {
@@ -1165,7 +1217,7 @@ function outcomeHtml(r) {
       <p class="mt-1">${p
         ? `담당자 : <strong>${esc(p.staffName)} ${roleLabel(p.staffRole)}</strong> (등록일 ${esc(formatDate(p.createdAt))})`
         : '등록 담당자 정보를 불러오지 못했습니다. 관리자에게 문의해주세요.'}</p>
-      <p class="text-xs mt-2 opacity-80">성함 / 주민등록번호 / 휴대폰 중 2가지 이상이 기존 고객과 일치합니다. 먼저 등록한 담당자가 우선입니다.</p>
+      <p class="text-xs mt-2 opacity-80">성함 / 주민등록번호 / 휴대폰 중 2가지 이상이 기존 고객과 일치합니다. 먼저 등록한 담당자가 우선입니다. (이미 등록된 고객이라 새로 저장되지 않았습니다)</p>
       ${mineBtn}`);
   }
   return messageHtml('ok', `
