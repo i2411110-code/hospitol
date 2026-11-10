@@ -16,6 +16,16 @@
     .toss-blue { background-color: #1b43a3; }
     .toss-blue-text { color: #1b43a3; }
     .toss-blue-border { border-color: #1b43a3; }
+
+    /* ── 가독성: 전체 글씨 키우기 (Tailwind의 작은 글씨 크기를 덮어씁니다) ── */
+    html { font-size: 17px; }
+    body { line-height: 1.6; }
+    .text-\[11px\] { font-size: 0.8125rem !important; line-height: 1.25rem !important; }
+    .text-xs { font-size: 0.9rem !important; line-height: 1.4rem !important; }
+    .text-sm { font-size: 1rem !important; line-height: 1.55rem !important; }
+    .text-gray-400 { color: #6b7280 !important; }   /* 옅은 회색 → 진하게 */
+    .text-gray-500 { color: #4b5563 !important; }
+    .text-gray-600 { color: #374151 !important; }
   </style>
 </head>
 <body class="min-h-screen text-gray-800 flex flex-col">
@@ -285,7 +295,7 @@
     </main>
 
     <!-- 하단 알림 (다른 담당자가 내 고객에 코멘트를 남겼을 때) -->
-    <div id="notifyTray" class="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] w-[calc(100%-2rem)] max-w-md space-y-2"></div>
+    <div id="notifyTray" class="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] w-[calc(100%-2rem)] max-w-lg space-y-3"></div>
   </div>
 
   <script type="module" src="app.js"></script>
