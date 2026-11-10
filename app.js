@@ -544,7 +544,10 @@ function visitFormHtml(p, v) {
   const isEdit = !!v;
   const key = v ? (v.visitDateKey || legacyKey(v)) : toDateKey(new Date());
   const hasVisits = (visitsCache.get(p.id) || []).length > 0;
-  const kind = v?.kind || (hasVisits ? '재방문' : '신규');
+  // 방문 기록이 있거나, 오늘 이전에 등록된 고객(시트 이관 고객 포함)이면 기본값은 재방문
+  const regKey = p.createdAt?.toDate ? toDateKey(p.createdAt.toDate()) : '';
+  const registeredBefore = !!regKey && regKey < toDateKey(new Date());
+  const kind = v?.kind || ((hasVisits || registeredBefore) ? '재방문' : '신규');
   const type = v?.type || '조회';
   return `
     <form data-form="visit" data-visit-id="${esc(v?.id || '')}" class="border-2 border-indigo-200 rounded-xl p-4 bg-indigo-50/40 space-y-4">
@@ -562,7 +565,7 @@ function visitFormHtml(p, v) {
           <div class="col-span-2"><label class="block text-[11px] text-gray-600 mb-0.5">치료내용</label><input type="text" data-f="treatment" value="${esc(v?.treatment)}" placeholder="수술" class="${INP}"></div>
         </div>
         <label data-claim-wrap class="${type === '청구' ? 'flex' : 'hidden'} items-center gap-1.5 mt-2 text-xs font-bold text-emerald-800">
-          <input type="checkbox" data-f="claimDone" ${v?.claimDone ? 'checked' : ''}> 청구 완료 (일일 현황 "보험금 청구현황"에 '청구완료'로 표시)
+          <input type="checkbox" data-f="claimDone" ${v?.claimDone ? 'checked' : ''}> 청구 완료 (체크하지 않으면 일일 현황에 '청구예정'으로 표시)
         </label>
       </div>
 
@@ -668,7 +671,7 @@ function regVisitHtml() {
         <div class="col-span-2"><label class="block text-[11px] text-gray-600 mb-0.5">치료내용</label><input type="text" data-f="treatment" placeholder="수술" class="${INP}"></div>
       </div>
       <label data-claim-wrap class="hidden items-center gap-1.5 text-xs font-bold text-emerald-800">
-        <input type="checkbox" data-f="claimDone"> 청구 완료 (일일 현황 "보험금 청구현황"에 '청구완료'로 표시)
+        <input type="checkbox" data-f="claimDone"> 청구 완료 (체크하지 않으면 일일 현황에 '청구예정'으로 표시)
       </label>
 
       <div>
@@ -804,6 +807,8 @@ async function submitCommentForm(form, card, pid) {
       teamId: p.teamId,
       author: currentStaff.name,
       authorUid: currentUser.uid,
+      authorTeamId: currentStaff.teamId, // 일일 현황(팀 전체) 집계용
+      dateKey: toDateKey(new Date()),      // 일일 현황 집계용 (작성한 날짜)
       tag,
       text,
       createdAt: serverTimestamp()
@@ -826,6 +831,7 @@ async function submitCommentForm(form, card, pid) {
     await batch.commit();
 
     card.querySelector('[data-panel]').innerHTML = messageHtml('ok', '코멘트를 저장했습니다.');
+    renderDailyReport();
     if (isMine(p) || isLeadOf(p)) {
       await loadComments(pid);
       refreshVisitBoxes(pid);
@@ -1337,7 +1343,7 @@ $('registerForm').addEventListener('submit', async (e) => {
    - 집계 범위: 팀원은 "내 고객" 기록, 팀장은 팀 전체도 선택 가능합니다.
    - collectionGroup('visits') 쿼리를 쓰므로 Firestore에서 visits 컬렉션 그룹 인덱스가 필요합니다.
 --------------------------------------------------------- */
-let dailyState = { key: '', visits: [] };
+let dailyState = { key: '', visits: [], comments: [], commentErr: '' };
 
 function initDailyControls() {
   $('dailyDate').value = toDateKey(new Date());
@@ -1350,11 +1356,13 @@ function initDailyControls() {
 }
 
 function buildReportText() {
-  const { key, visits } = dailyState;
+  const { key, visits, comments = [] } = dailyState;
   const d = keyToDate(key);
   const reporter = $('dailyReporter').value.trim();
 
-  // 같은 고객이 하루에 여러 번 기록돼도 1명으로 셉니다 (신규 기록이 하나라도 있으면 신규)
+  // 같은 고객이 하루에 여러 번 기록돼도 1명으로 셉니다.
+  // - 방문 기록 중 '신규'가 하나라도 있으면 신규, 아니면 재방문
+  // - 다른 담당자 고객에 남긴 코멘트는 재방문 1명으로 셉니다 (내 고객에 내가 남긴 코멘트는 집계 제외)
   const byPatient = new Map();
   visits.forEach(v => {
     const id = v.patientId || v.patientName;
@@ -1362,14 +1370,23 @@ function buildReportText() {
     if (v.kind === '신규') cur.kind = '신규';
     byPatient.set(id, cur);
   });
+  const othersComments = comments.filter(c => c.ownerKey !== normName(c.author));
+  othersComments.forEach(c => {
+    if (!byPatient.has(c.patientId)) byPatient.set(c.patientId, { kind: '재방문' });
+  });
   const total = byPatient.size;
   const newCnt = Array.from(byPatient.values()).filter(x => x.kind === '신규').length;
   const revCnt = total - newCnt;
 
-  const claims = Array.from(new Set(
-    visits.filter(v => v.type === '청구')
-      .map(v => `${v.patientName}(${v.staffName}) - ${v.claimDone ? '청구완료' : '청구진행'}`)
-  ));
+  // 보험금 청구현황: 청구 방문 기록(청구완료/청구예정) + 다른 담당자 고객에 남긴 '청구 관련' 코멘트(청구예정)
+  // 같은 고객이 여러 번 나오면 청구완료가 우선입니다.
+  const claimMap = new Map();
+  const setClaim = (k, st) => { if (claimMap.get(k) !== '청구완료') claimMap.set(k, st); };
+  visits.filter(v => v.type === '청구')
+    .forEach(v => setClaim(`${v.patientName}(${v.staffName})`, v.claimDone ? '청구완료' : '청구예정'));
+  othersComments.filter(c => c.tag === '청구 관련')
+    .forEach(c => setClaim(`${c.patientName}(${c.ownerKey})`, '청구예정'));
+  const claims = Array.from(claimMap, ([k, st]) => `${k} - ${st}`);
 
   const text = [
     '★서울연세병원 일일 보험조회현황★',
@@ -1391,7 +1408,7 @@ function drawDailyReport() {
   $('dailyRevisit').textContent = revCnt;
   const pre = $('dailyReportText');
   pre.className = 'bg-slate-50 border rounded-xl p-4 text-sm whitespace-pre-wrap font-sans leading-relaxed text-gray-800';
-  pre.textContent = text;
+  pre.textContent = text + (dailyState.commentErr ? `\n\n※ 코멘트 집계를 불러오지 못했습니다 (복사 내용에는 포함되지 않음): ${dailyState.commentErr}` : '');
 }
 
 async function renderDailyReport() {
@@ -1409,7 +1426,19 @@ async function renderDailyReport() {
       scope === 'team' ? where('teamId', '==', currentStaff.teamId) : where('staffName', '==', currentStaff.name)
     );
     const snap = await getDocs(q);
-    dailyState = { key, visits: snap.docs.map(d => d.data()) };
+    // 다른 담당자 고객에 남긴 코멘트도 함께 집계 (실패해도 방문 기록 집계는 그대로 보여줍니다)
+    let comments = [], commentErr = '';
+    try {
+      const cq = query(
+        collectionGroup(db, 'comments'),
+        where('dateKey', '==', key),
+        scope === 'team' ? where('authorTeamId', '==', currentStaff.teamId) : where('authorUid', '==', currentUser.uid)
+      );
+      comments = (await getDocs(cq)).docs.map(d => d.data());
+    } catch (err) {
+      commentErr = err.message;
+    }
+    dailyState = { key, visits: snap.docs.map(d => d.data()), comments, commentErr };
     drawDailyReport();
   } catch (err) {
     pre.className = 'bg-red-50 border border-red-200 rounded-xl p-4 text-xs text-red-700 whitespace-pre-wrap break-all';
