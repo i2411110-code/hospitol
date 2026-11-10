@@ -966,6 +966,7 @@ async function deletePatient(pid) {
     patientMap.delete(pid);
     visitsCache.delete(pid);
     commentsCache.delete(pid);
+    teamCache = teamCache.filter(x => x.id !== pid);
     document.querySelectorAll(`[data-card="${pid}"]`).forEach(el => el.remove());
     if (myPatientsCache) {
       myPatientsCache = myPatientsCache.filter(x => x.id !== pid);
@@ -1602,56 +1603,104 @@ notifyTray.addEventListener('click', async (e) => {
 /* ---------------------------------------------------------
    팀 전체 현황 (팀장만 접근 - 같은 팀 담당자들이 등록한 고객)
 --------------------------------------------------------- */
+// 팀 전체 현황은 표가 아니라 "고객 카드" 목록입니다 → 카드에서 방문 기록 / 코멘트 / 방문 기록 추가가 모두 가능합니다.
+// (팀장은 같은 팀 고객의 방문 기록과 코멘트를 볼 수 있고, 수정/삭제는 담당자 본인만 가능합니다)
+let teamCache = [];
+let teamFilter = { staff: '', q: '', limit: 30 };
+const TEAM_PAGE = 30;
+
+wireCardRoot($('teamOverviewBody'));
+
+function drawTeamList() {
+  const box = $('teamList');
+  if (!box) return;
+  const f = normName(teamFilter.q);
+  const list = teamCache.filter(p =>
+    (!teamFilter.staff || p.staffName === teamFilter.staff) &&
+    (!f || (p.nameKey || '').includes(f)));
+  if (!list.length) {
+    box.innerHTML = '<p class="text-sm text-gray-500 p-6 text-center">조건에 맞는 고객이 없습니다.</p>';
+    return;
+  }
+  const shown = list.slice(0, teamFilter.limit);
+  box.innerHTML =
+    `<p class="text-xs text-gray-600 mb-3">총 ${list.length}명${list.length > shown.length ? ` 중 ${shown.length}명 표시` : ''}</p>` +
+    shown.map(p => cardHtml(p, { badge: false })).join('') +
+    (list.length > shown.length
+      ? `<button type="button" data-tmore class="w-full py-3 mt-2 bg-slate-100 text-gray-800 font-bold rounded-xl hover:bg-slate-200">더 보기 (+${Math.min(TEAM_PAGE, list.length - shown.length)}명)</button>`
+      : '');
+}
+
+function markTeamTiles() {
+  document.querySelectorAll('#teamOverviewBody [data-tstaff]').forEach(el => {
+    const on = el.dataset.tstaff === teamFilter.staff;
+    el.classList.toggle('ring-2', on);
+    el.classList.toggle('ring-emerald-500', on);
+    el.classList.toggle('bg-emerald-50', on);
+    el.classList.toggle('bg-indigo-50', !on);
+  });
+}
+
+$('teamOverviewBody').addEventListener('click', (e) => {
+  const tile = e.target.closest('[data-tstaff]');
+  if (tile) {
+    // 같은 담당자를 다시 누르면 필터 해제
+    teamFilter.staff = (teamFilter.staff === tile.dataset.tstaff) ? '' : tile.dataset.tstaff;
+    teamFilter.limit = TEAM_PAGE;
+    markTeamTiles();
+    drawTeamList();
+    return;
+  }
+  if (e.target.closest('[data-tmore]')) {
+    teamFilter.limit += TEAM_PAGE;
+    drawTeamList();
+  }
+});
+$('teamOverviewBody').addEventListener('input', (e) => {
+  if (e.target.id !== 'teamSearch') return;
+  teamFilter.q = e.target.value;
+  teamFilter.limit = TEAM_PAGE;
+  drawTeamList();
+});
+
 async function renderTeamOverview() {
   const wrap = $('teamOverviewBody');
   if (currentStaff.role !== 'lead') {
     wrap.innerHTML = `<p class="text-sm text-gray-500 p-6 text-center">팀장 권한이 필요한 화면입니다.</p>`;
     return;
   }
-  wrap.innerHTML = `<p class="text-sm text-gray-400 p-6 text-center">불러오는 중...</p>`;
+  wrap.innerHTML = `<p class="text-sm text-gray-500 p-6 text-center">불러오는 중...</p>`;
 
   try {
     const q = query(collection(db, 'patients'), where('teamId', '==', currentStaff.teamId));
     const snap = await getDocs(q);
-    const list = snap.docs
-      .map(d => d.data())
+    teamCache = snap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
       .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
+    teamFilter = { staff: '', q: '', limit: TEAM_PAGE };
 
-    if (list.length === 0) {
-      wrap.innerHTML = `<p class="text-sm text-gray-400 p-6 text-center">우리 팀에 등록된 고객이 없습니다.</p>`;
+    if (teamCache.length === 0) {
+      wrap.innerHTML = `<p class="text-sm text-gray-500 p-6 text-center">우리 팀에 등록된 고객이 없습니다.</p>`;
       return;
     }
 
-    // 담당자별 집계
+    // 담당자별 집계 (누르면 그 담당자 고객만 보기)
     const byStaff = {};
-    list.forEach(p => { byStaff[p.staffName] = (byStaff[p.staffName] || 0) + 1; });
+    teamCache.forEach(p => { byStaff[p.staffName] = (byStaff[p.staffName] || 0) + 1; });
 
-    const summaryHtml = Object.entries(byStaff).map(([name, count]) => `
-      <div class="bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-3 text-center">
+    const summaryHtml = Object.entries(byStaff).sort((a, b) => b[1] - a[1]).map(([name, count]) => `
+      <button type="button" data-tstaff="${esc(name)}" class="bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-3 text-center hover:bg-indigo-100">
         <div class="text-xs font-bold text-indigo-700">${esc(name)}</div>
         <div class="text-2xl font-extrabold text-indigo-900">${count}<span class="text-xs font-normal ml-1">명</span></div>
-      </div>`).join('');
-
-    const rowsHtml = list.map(p => `
-      <tr class="hover:bg-slate-50">
-        <td class="p-3 text-[11px] text-gray-400">${esc(formatDate(p.createdAt))}</td>
-        <td class="p-3 font-bold text-indigo-700">${esc(p.staffName)}</td>
-        <td class="p-3 font-bold">${esc(p.name)}</td>
-        <td class="p-3">${esc(p.phoneMasked)}</td>
-      </tr>`).join('');
+      </button>`).join('');
 
     wrap.innerHTML = `
-      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">${summaryHtml}</div>
-      <div class="overflow-x-auto">
-        <table class="w-full text-left text-xs border-collapse">
-          <thead>
-            <tr class="bg-slate-100 text-gray-700 font-bold border-b">
-              <th class="p-3">등록일시</th><th class="p-3">담당자</th><th class="p-3">고객명</th><th class="p-3">휴대폰</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y text-gray-600">${rowsHtml}</tbody>
-        </table>
-      </div>`;
+      <p class="text-xs text-gray-600 mb-2">담당자를 누르면 그 담당자의 고객만 볼 수 있습니다. 고객 카드에서 방문 기록과 코멘트를 확인하세요.</p>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">${summaryHtml}</div>
+      <input type="text" id="teamSearch" autocomplete="off" placeholder="고객 이름으로 걸러보기" class="w-full border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500 mb-4">
+      <div id="teamList"></div>`;
+    markTeamTiles();
+    drawTeamList();
   } catch (err) {
     wrap.innerHTML = `<p class="text-sm text-red-600 p-6 text-center">불러오지 못했습니다: ${esc(err.message)}</p>`;
   }
