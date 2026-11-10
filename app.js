@@ -298,7 +298,12 @@ async function loadStaffProfile() {
     if (!csnap.exists()) {
       await setDoc(cref, { uid: currentUser.uid, name: normName(currentStaff.name), createdAt: serverTimestamp() });
     } else if (csnap.data().uid !== currentUser.uid) {
-      console.warn('[staff] 같은 이름의 다른 계정이 이미 이름을 선점했습니다:', currentStaff.name);
+      // 이름 주인의 staff 문서가 사라진 경우(계정 삭제 등)에는 규칙상 이어받기가 허용됩니다. 아니면 거부되어 경고만 남깁니다.
+      try {
+        await setDoc(cref, { uid: currentUser.uid, name: normName(currentStaff.name), createdAt: serverTimestamp() });
+      } catch (e2) {
+        console.warn('[staff] 같은 이름의 다른 계정이 이미 이름을 선점했습니다:', currentStaff.name);
+      }
     }
   } catch (err) { /* 규칙 미게시 등: 로그인은 계속 진행 */ }
   setupView.classList.add('hidden');
