@@ -174,9 +174,21 @@ btnKakaoLogin.addEventListener('click', () => {
 
 setupForm.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const name = document.getElementById('setup-name').value.trim();
-  const teamId = document.getElementById('setup-teamId').value.trim();
-  if (!name || !teamId) return;
+  // 이름은 공백을 제거해 저장합니다 (시트 이관 데이터의 담당자 이름과 정확히 맞추기 위함)
+  const name = normName(document.getElementById('setup-name').value);
+  let teamId = document.getElementById('setup-teamId').value.trim();
+  if (!name) return;
+
+  // 팀 명단(staffRoster)에 이름이 있으면 팀 코드를 자동 적용 → 기존 고객 기록이 이름으로 자동 연결됨
+  try {
+    const rosterSnap = await getDoc(doc(db, 'staffRoster', name));
+    if (rosterSnap.exists()) teamId = rosterSnap.data().teamId;
+  } catch (err) { /* 명단 조회 실패 시 직접 입력한 값 사용 */ }
+
+  if (!teamId) {
+    alert('팀 명단에서 이름을 찾지 못했습니다. 팀 코드를 직접 입력해주세요.');
+    return;
+  }
 
   // 최초 가입자는 기본 role 'staff'로 생성됩니다.
   // 팀장(role: 'lead') 권한은 Firebase 콘솔 > Firestore > staff/{uid} 문서에서
@@ -244,6 +256,7 @@ window.switchTab = function switchTab(tabId) {
   }
 
   if (tabId === 'team-overview') renderTeamOverview();
+  if (tabId === 'my-patients') renderMyPatients();
   if (tabId === 'lookup') document.getElementById('lookupName').focus();
 };
 
@@ -252,6 +265,100 @@ window.switchTab = function switchTab(tabId) {
    - patients 컬렉션에서 이름(공백 제거)이 입력값으로 "시작하는" 고객을 찾습니다.
 --------------------------------------------------------- */
 const lookupResult = document.getElementById('lookupResult');
+
+// 담당자 이름(공백 제거)으로 연결 — 시트 이관 고객은 staffId 가 없고 이름만 있으므로,
+// 같은 이름으로 가입한 팀원은 별도 작업 없이 자동으로 "내 고객"이 됩니다.
+function isMine(p) {
+  return (p.staffId && p.staffId === currentUser.uid) ||
+    (currentStaff && normName(p.staffName) === normName(currentStaff.name));
+}
+function isLeadOf(p) {
+  return currentStaff?.role === 'lead' && p.teamId === currentStaff.teamId;
+}
+
+function renderPolicies(policies) {
+  if (!policies?.length) return '';
+  const rows = policies.map(x => `
+    <tr class="border-t">
+      <td class="py-1 pr-2">${esc(x.insurer)}</td>
+      <td class="py-1 pr-2">${esc(x.joinDate)}</td>
+      <td class="py-1 pr-2">질병입원 ${esc(x.illnessInpatient)} / 상해입원 ${esc(x.injuryInpatient)}</td>
+      <td class="py-1">질병통원 ${esc(x.illnessOutpatient)} / 상해통원 ${esc(x.injuryOutpatient)}</td>
+    </tr>`).join('');
+  return `<div class="overflow-x-auto mt-2"><table class="text-[11px] text-gray-600 w-full">${rows}</table></div>`;
+}
+
+async function toggleVisits(patientId, box, btn) {
+  if (box.dataset.loaded === '1') {
+    const open = !box.classList.contains('hidden');
+    box.classList.toggle('hidden', open);
+    btn.textContent = open ? '방문 기록 보기' : '방문 기록 접기';
+    return;
+  }
+  box.innerHTML = '<p class="text-xs text-gray-400">불러오는 중...</p>';
+  try {
+    const snap = await getDocs(collection(db, 'patients', patientId, 'visits'));
+    const visits = snap.docs.map(d => d.data()).sort((a, b) => (b.rowNo ?? 0) - (a.rowNo ?? 0));
+    box.dataset.loaded = '1';
+    btn.textContent = '방문 기록 접기';
+    if (!visits.length) { box.innerHTML = '<p class="text-xs text-gray-400">방문 기록이 없습니다.</p>'; return; }
+    box.innerHTML = visits.map(v => `
+      <div class="border rounded-lg p-3 bg-slate-50 mb-2 text-xs text-gray-700">
+        <div class="flex flex-wrap gap-x-3 gap-y-1 items-center">
+          <span class="font-bold text-gray-900">${esc(v.visitDate || v.visitDateRaw || '날짜 미상')}</span>
+          <span>근무자 ${esc(v.worker)}</span>
+          ${v.type ? `<span class="bg-indigo-100 text-indigo-800 font-bold px-1.5 py-0.5 rounded">${esc(v.type)}</span>` : ''}
+          ${v.admission ? `<span class="bg-slate-200 px-1.5 py-0.5 rounded">${esc(v.admission)}</span>` : ''}
+        </div>
+        <p class="mt-1">${esc([v.bodyPart, v.treatment].filter(Boolean).join(' · '))}${v.phone ? ` · ${esc(formatPhoneInput(v.phone))}` : ''}</p>
+        ${v.noSilson ? '<p class="mt-1 text-amber-700 font-bold">실손 미가입</p>' : renderPolicies(v.policies)}
+        ${v.memo ? `<p class="mt-2 whitespace-pre-wrap leading-relaxed">${esc(v.memo)}</p>` : ''}
+      </div>`).join('');
+  } catch (err) {
+    box.innerHTML = `<p class="text-xs text-red-600">불러오지 못했습니다: ${esc(err.message)}</p>`;
+  }
+}
+
+let myPatientsCache = null;
+async function renderMyPatients() {
+  const body = document.getElementById('myPatientsBody');
+  body.innerHTML = '<p class="text-sm text-gray-400 p-6 text-center">불러오는 중...</p>';
+  try {
+    const snap = await getDocs(query(collection(db, 'patients'), where('staffName', '==', currentStaff.name)));
+    myPatientsCache = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => (b.createdAt?.toMillis?.() ?? 0) - (a.createdAt?.toMillis?.() ?? 0));
+    drawMyPatients();
+  } catch (err) {
+    body.innerHTML = `<p class="text-sm text-red-600 p-6 text-center">불러오지 못했습니다: ${esc(err.message)}</p>`;
+  }
+}
+function drawMyPatients() {
+  const body = document.getElementById('myPatientsBody');
+  const f = normName(document.getElementById('myPatientsFilter').value);
+  const list = (myPatientsCache || []).filter(p => !f || p.nameKey.includes(f));
+  if (!list.length) {
+    body.innerHTML = '<p class="text-sm text-gray-400 p-6 text-center">표시할 고객이 없습니다.</p>';
+    return;
+  }
+  body.innerHTML = `<p class="text-xs text-gray-500 mb-3">총 ${list.length}명</p>` + list.map(p => `
+    <div class="border rounded-xl p-4 mb-2 bg-white">
+      <div class="flex justify-between items-center gap-3">
+        <div>
+          <span class="font-bold text-gray-900">${esc(p.name)}</span>
+          <span class="text-xs text-gray-400 ml-2">${esc(p.phoneMasked)} · 등록일 ${esc(formatDate(p.createdAt))}</span>
+        </div>
+        <button type="button" data-visits="${esc(p.id)}" class="text-xs font-bold text-indigo-700 hover:underline whitespace-nowrap">방문 기록 보기</button>
+      </div>
+      <div data-visits-box="${esc(p.id)}" class="mt-2"></div>
+    </div>`).join('');
+  body.querySelectorAll('[data-visits]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.visits;
+      toggleVisits(id, body.querySelector(`[data-visits-box="${id}"]`), btn);
+    });
+  });
+}
+document.getElementById('myPatientsFilter').addEventListener('input', drawMyPatients);
 
 function staffLine(p) {
   return `담당자 : ${esc(p.staffName)} ${roleLabel(p.staffRole)}`;
@@ -278,7 +385,7 @@ document.getElementById('lookupForm').addEventListener('submit', async (e) => {
     );
     const snap = await getDocs(q);
     const list = snap.docs
-      .map(d => d.data())
+      .map(d => ({ id: d.id, ...d.data() }))
       .sort((a, b) => (a.createdAt?.toMillis?.() ?? 0) - (b.createdAt?.toMillis?.() ?? 0));
 
     if (list.length === 0) {
@@ -298,18 +405,27 @@ document.getElementById('lookupForm').addEventListener('submit', async (e) => {
 
     lookupResult.className = 'space-y-2';
     lookupResult.innerHTML = list.map(p => {
-      const mine = p.staffId === currentUser.uid;
+      const mine = isMine(p);
+      const canSee = mine || isLeadOf(p);
       return `
-        <div class="bg-white border rounded-xl p-4 text-left shadow-sm flex justify-between items-center gap-3">
+        <div class="bg-white border rounded-xl p-4 text-left shadow-sm">
           <div>
             <span class="bg-emerald-100 text-emerald-800 font-bold text-xs px-2 py-0.5 rounded">등록된 고객</span>
             ${mine ? '<span class="bg-indigo-100 text-indigo-800 font-bold text-xs px-2 py-0.5 rounded ml-1">내 고객</span>' : ''}
             <h4 class="font-bold text-lg text-gray-900 mt-1">${esc(p.name)}</h4>
             <p class="text-sm font-bold text-indigo-700 mt-0.5">${staffLine(p)}</p>
             <p class="text-xs text-gray-400 mt-1">${esc(p.phoneMasked)} · 등록일 ${esc(formatDate(p.createdAt))}</p>
+            ${canSee ? `<button type="button" data-visits="${esc(p.id)}" class="mt-2 text-xs font-bold text-indigo-700 hover:underline">방문 기록 보기</button>
+            <div data-visits-box="${esc(p.id)}" class="mt-2"></div>` : ''}
           </div>
         </div>`;
     }).join('');
+    lookupResult.querySelectorAll('[data-visits]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.visits;
+        toggleVisits(id, lookupResult.querySelector(`[data-visits-box="${id}"]`), btn);
+      });
+    });
   } catch (err) {
     lookupResult.className = 'border rounded-xl p-4 bg-red-50 text-center text-sm text-red-600';
     lookupResult.textContent = '조회 중 오류가 발생했습니다: ' + err.message;
@@ -361,7 +477,8 @@ document.getElementById('registerForm').addEventListener('submit', async (e) => 
     const hashes = await Promise.all([
       sha256Hex(`ns|${nk}|${ssn}`),     // 성함 + 주민번호
       sha256Hex(`np|${nk}|${phone}`),   // 성함 + 휴대폰
-      sha256Hex(`sp|${ssn}|${phone}`)   // 주민번호 + 휴대폰
+      sha256Hex(`sp|${ssn}|${phone}`),  // 주민번호 + 휴대폰
+      sha256Hex(`nb|${nk}|${ssn.slice(0, 6)}`) // 성함 + 생년월일(앞 6자리) — 시트 이관 고객과의 중복 판정용
     ]);
     const keyRefs = hashes.map(h => doc(db, 'patientKeys', h));
     const patientRef = doc(collection(db, 'patients'));

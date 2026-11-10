@@ -75,8 +75,8 @@
         </div>
         <div>
           <label class="block text-xs font-bold text-gray-700 mb-1">팀 코드</label>
-          <input type="text" id="setup-teamId" required placeholder="예: gaon-team-1" class="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
-          <p class="text-[11px] text-gray-400 mt-1">같은 팀원끼리는 동일한 팀 코드를 입력해야 서로의 접수 현황이 묶여서 보입니다.</p>
+          <input type="text" id="setup-teamId" placeholder="예: gaon-team-1" class="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+          <p class="text-[11px] text-gray-400 mt-1">이름이 팀 명단에 있으면 팀 코드는 자동으로 채워집니다. 명단에 없을 때만 직접 입력하세요.</p>
         </div>
         <button type="submit" class="w-full py-2.5 toss-blue text-white font-bold rounded-xl shadow hover:bg-blue-900 transition">
           시작하기
@@ -118,6 +118,9 @@
         <button onclick="switchTab('lookup')" id="tab-lookup" class="tab-btn px-4 py-3 text-sm font-bold border-b-2 border-indigo-700 text-indigo-700 bg-white">
           <i class="fa-solid fa-magnifying-glass mr-1"></i> 고객 조회
         </button>
+        <button onclick="switchTab('my-patients')" id="tab-my-patients" class="tab-btn px-4 py-3 text-sm font-semibold text-gray-600 hover:text-indigo-700">
+          <i class="fa-solid fa-address-book mr-1"></i> 내 고객
+        </button>
         <button onclick="switchTab('new-registration')" id="tab-new-registration" class="tab-btn px-4 py-3 text-sm font-semibold text-gray-600 hover:text-indigo-700">
           <i class="fa-solid fa-user-plus mr-1"></i> 신규 접수
         </button>
@@ -148,6 +151,18 @@
           <div id="lookupResult" class="border rounded-xl p-4 bg-slate-50 text-center text-sm text-gray-500">
             고객명을 입력하고 조회 버튼을 눌러주세요.
           </div>
+        </div>
+      </div>
+
+      <!-- 내 고객 (담당자 이름으로 자동 연결된 고객 + 방문 기록) -->
+      <div id="view-my-patients" class="tab-content hidden">
+        <div class="bg-white rounded-2xl p-6 shadow-sm border">
+          <div class="pb-4 mb-6 border-b">
+            <h2 class="text-xl font-bold text-gray-900"><i class="fa-solid fa-address-book text-indigo-600 mr-2"></i>내 고객</h2>
+            <p class="text-xs text-gray-500 mt-1">내 이름으로 등록된 고객과 방문 기록입니다. 고객을 누르면 상담 내용을 볼 수 있습니다.</p>
+          </div>
+          <input type="text" id="myPatientsFilter" autocomplete="off" placeholder="이름으로 걸러보기" class="w-full border rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500 mb-4">
+          <div id="myPatientsBody"></div>
         </div>
       </div>
 
